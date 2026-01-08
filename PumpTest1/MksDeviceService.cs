@@ -12,7 +12,7 @@ namespace PumpTest1
         public double? Ch1 { get; set; }
         public double? Ch2 { get; set; }
         public double? Ch3 { get; set; }
-        public string Unit { get; set; } // 데이터에 단위를 포함해서 전달
+        public string Unit { get; set; }
     }
 
     public class MksDeviceService
@@ -26,7 +26,6 @@ namespace PumpTest1
         private const int DEVICE_ID = 253;
         private const string TERMINATOR = ";FF";
 
-        // [1번요청] 현재 단위 (최초 1회만 읽음)
         public string CurrentUnit { get; private set; } = "Unknown";
         public MksData CurrentData { get; private set; }
 
@@ -43,6 +42,7 @@ namespace PumpTest1
         public void Stop()
         {
             _isRunning = false;
+            CurrentData = null; // 데이터 초기화
         }
 
         public bool SetUnit(string unitName, string portName)
@@ -56,7 +56,13 @@ namespace PumpTest1
                     Thread.Sleep(500);
                     sp.DiscardInBuffer(); sp.Write($"@{DEVICE_ID}U?{TERMINATOR}");
                     string resp = sp.ReadTo(TERMINATOR);
-                    return resp.ToUpper().Contains(unitName);
+                    // 설정 변경 후 CurrentUnit 업데이트
+                    if (resp.ToUpper().Contains(unitName))
+                    {
+                        CurrentUnit = unitName;
+                        return true;
+                    }
+                    return false;
                 }
             }
             catch { return false; }
@@ -73,21 +79,25 @@ namespace PumpTest1
                 _serialPort.Open();
                 OnStatusChanged?.Invoke($"Connected {PortName}");
             }
-            catch (Exception ex) { OnError?.Invoke($"Conn Failed: {ex.Message}"); _isRunning = false; return; }
+            catch (Exception ex)
+            {
+                OnError?.Invoke($"Conn Failed: {ex.Message}");
+                _isRunning = false;
+                return;
+            }
 
-            // [1번요청 반영] 시작 시 단위를 1회만 읽고 저장
             try { CurrentUnit = GetUnitInternal(); } catch { CurrentUnit = "Unknown"; }
 
             while (_isRunning)
             {
                 DateTime start = DateTime.Now;
 
+                // Live Reading
                 double? v1 = GetPressureInternal(1);
                 double? v2 = GetPressureInternal(2);
                 double? v3 = GetPressureInternal(3);
                 string now = start.ToString("yyyy-MM-dd HH:mm:ss");
 
-                // 읽어둔 단위를 그대로 사용
                 CurrentData = new MksData { Timestamp = now, Ch1 = v1, Ch2 = v2, Ch3 = v3, Unit = CurrentUnit };
 
                 int wait = IntervalMs - (int)(DateTime.Now - start).TotalMilliseconds;

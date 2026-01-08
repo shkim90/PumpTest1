@@ -4,36 +4,47 @@ using System.Windows.Forms;
 using System.IO;
 using System.Threading.Tasks;
 using System.Text;
-using System.IO.Ports; // 포트 검색용
+using System.IO.Ports;
+using System.Diagnostics;
 
 namespace PumpTest1
 {
     public partial class Form1 : Form
     {
-        // [설정] 자주 쓰는 MKS 포트가 있다면 여기에 적으세요.
-        private string _defaultMksPort = "COM3";
+        private string _configFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.txt");
 
         private bool _isLogging = false;
+
+        // 연결 상태 플래그 (UI 버튼 상태 관리용)
+        private bool _isTcpConnected = false;
+        private bool _isMksConnected = false;
 
         private TcpDeviceService _tcpService;
         private MksDeviceService _mksService;
 
-        // UI Controls
+        // === UI Controls ===
+        // [FMS]
         private TextBox _txtTcpIp, _txtTcpPort;
-        private ComboBox _cboMksPort;
-        private Button _btnMksRefresh;
-        private TextBox _txtPath;
-        private NumericUpDown _numInterval;
-        private Button _btnBrowse, _btnStart, _btnStop;
-        private ComboBox _cboMksUnit;
-        private Button _btnMksUnitApply;
-
+        private Button _btnTcpConnect;
+        private Label _lblTcpLight;
         private Label[] _tcpNameLabels;
         private Label[] _tcpValueLabels;
+
+        // [MKS]
+        private ComboBox _cboMksPort, _cboMksUnit;
+        private Button _btnMksRefresh, _btnMksUnitApply;
+        private Button _btnMksConnect;
+        private Label _lblMksLight;
+        // private Label _lblMksCurrentUnit; // [삭제] 개별 표시로 변경
         private Label[] _mksValueLabels;
-        private Label _lblStatus;
+
+        // [Logging]
+        private TextBox _txtPath;
+        private NumericUpDown _numInterval;
+        private Button _btnBrowse, _btnOpenFolder;
+        private Button _btnStart, _btnStop;
         private Label _lblElapsed;
-        private Label _lblTcpLight, _lblMksLight;
+        private Label _lblStatus;
 
         private System.Windows.Forms.Timer _timerElapsed;
         private DateTime _logStartTime;
@@ -43,88 +54,155 @@ namespace PumpTest1
             InitializeComponent();
             InitializeUnifiedUI();
 
-            // 서비스 초기화
             _tcpService = new TcpDeviceService();
             _mksService = new MksDeviceService();
 
-            // TCP 이벤트 연결
+            // TCP 이벤트
             _tcpService.OnStatusChanged += (msg) => UpdateStatus($"[TCP] {msg}");
             _tcpService.OnChannelInfoReady += Tcp_OnChannelInfoReady;
             _tcpService.OnError += (msg) => {
-                UpdateStatus($"[TCP Error] {msg}");
-                UpdateLight(_lblTcpLight, Color.Red); // 에러시 빨간불
+                UpdateStatus($"[TCP Err] {msg}");
+                UpdateLight(_lblTcpLight, Color.Red);
             };
 
-            // MKS 이벤트 연결
+            // MKS 이벤트
             _mksService.OnStatusChanged += (msg) => UpdateStatus($"[MKS] {msg}");
             _mksService.OnError += (msg) => {
-                UpdateStatus($"[MKS Error] {msg}");
-                UpdateLight(_lblMksLight, Color.Red); // 에러시 빨간불
+                UpdateStatus($"[MKS Err] {msg}");
+                UpdateLight(_lblMksLight, Color.Red);
             };
 
-            // 화면 갱신 타이머 (1초 -> 0.5초로 더 부드럽게)
+            // [핵심] UI 갱신용 타이머 (0.5초 간격)
             _timerElapsed = new System.Windows.Forms.Timer { Interval = 500 };
             _timerElapsed.Tick += Timer_Tick;
+
+            // 설정 로드
+            LoadSettings();
         }
 
-        // START 버튼: 연결 시작 및 로깅 시작
-        private async void BtnStart_Click(object sender, EventArgs e)
+        // =======================================================================
+        // [FMS] 연결 / 해제
+        // =======================================================================
+        private async void BtnTcpConnect_Click(object sender, EventArgs e)
         {
-            // 설정 적용
-            _tcpService.IpAddress = _txtTcpIp.Text;
-            if (int.TryParse(_txtTcpPort.Text, out int port)) _tcpService.Port = port;
-
-            _mksService.PortName = _cboMksPort.Text;
-            int interval = (int)_numInterval.Value;
-            _tcpService.IntervalMs = interval;
-            _mksService.IntervalMs = interval;
-
-            ToggleInputs(false);
-
-            // 서비스 시작 (내부에서 알아서 재접속함)
-            _tcpService.Start();
-
-            if (!string.IsNullOrEmpty(_cboMksPort.Text))
-                _mksService.Start();
-
-            // 상태등 일단 노란색(시도중)
-            UpdateLight(_lblTcpLight, Color.Gold);
-            UpdateLight(_lblMksLight, Color.Gold);
-
-            // 라벨 수신 대기 (최대 3초만 기다리고 진행)
-            UpdateStatus("Waiting for device info...");
-            int retry = 0;
-            while (retry < 30) // 3초
+            if (_isTcpConnected)
             {
-                if (_tcpService.Connected && _tcpService.ChannelLabels[0] != "CH1") break; // 라벨 들어오면 통과
+                // DISCONNECT 로직
+                _tcpService.Stop();
+                _isTcpConnected = false;
+
+                _btnTcpConnect.Text = "CONNECT FMS";
+                _btnTcpConnect.BackColor = Color.LightGray;
+
+                ToggleFmsInputs(true);
+                ResetTcpUI(); // [중요] 즉시 화면 초기화
+                UpdateStatus("FMS Disconnected.");
+            }
+            else
+            {
+                // CONNECT 로직
+                _tcpService.IpAddress = _txtTcpIp.Text;
+                if (int.TryParse(_txtTcpPort.Text, out int port)) _tcpService.Port = port;
+                _tcpService.IntervalMs = 500; // Live Monitoring 기본 속도
+
+                _tcpService.Start();
+                _isTcpConnected = true;
+
+                _btnTcpConnect.Text = "DISCONNECT";
+                _btnTcpConnect.BackColor = Color.Salmon;
+
+                ToggleFmsInputs(false);
+                UpdateLight(_lblTcpLight, Color.Gold); // 연결 시도 중 노란불
+
+                UpdateStatus("FMS Connecting...");
+                await WaitLabelsAsync();
+            }
+        }
+
+        // =======================================================================
+        // [MKS] 연결 / 해제
+        // =======================================================================
+        private void BtnMksConnect_Click(object sender, EventArgs e)
+        {
+            if (_isMksConnected)
+            {
+                // DISCONNECT 로직
+                _mksService.Stop();
+                _isMksConnected = false;
+
+                _btnMksConnect.Text = "CONNECT MKS";
+                _btnMksConnect.BackColor = Color.LightGray;
+
+                ToggleMksInputs(true);
+                ResetMksUI(); // [중요] 즉시 화면 초기화
+                UpdateStatus("MKS Disconnected.");
+            }
+            else
+            {
+                // CONNECT 로직
+                if (string.IsNullOrEmpty(_cboMksPort.Text)) { MessageBox.Show("Select MKS Port"); return; }
+
+                _mksService.PortName = _cboMksPort.Text;
+                _mksService.IntervalMs = 500; // Live Monitoring 기본 속도
+
+                _mksService.Start();
+                _isMksConnected = true;
+
+                _btnMksConnect.Text = "DISCONNECT";
+                _btnMksConnect.BackColor = Color.Salmon;
+
+                ToggleMksInputs(false);
+                UpdateLight(_lblMksLight, Color.Gold); // 연결 시도 중 노란불
+                UpdateStatus("MKS Connecting...");
+            }
+        }
+
+        // FMS 라벨 업데이트 대기
+        private async Task WaitLabelsAsync()
+        {
+            int retry = 0;
+            while (retry < 30)
+            {
+                if (_tcpService.Connected && _tcpService.ChannelLabels[0] != "CH1") break;
                 await Task.Delay(100);
                 retry++;
             }
+        }
 
-            // 로깅 시작
+        // =======================================================================
+        // 로깅(저장) 로직
+        // =======================================================================
+        private void BtnStartLog_Click(object sender, EventArgs e)
+        {
+            // 하나라도 연결되어 있어야 로깅 가능 (원하는 경우 둘 다 끊겨도 로깅은 돌릴 수 있으나 데이터가 없으므로 체크)
+            if (!_isTcpConnected && !_isMksConnected)
+            {
+                if (MessageBox.Show("No devices connected. Start logging anyway?", "Warning", MessageBoxButtons.YesNo) == DialogResult.No)
+                    return;
+            }
+
             _isLogging = true;
             _logStartTime = DateTime.Now;
-            _timerElapsed.Start();
+            _timerElapsed.Start(); // 타이머 확실히 시작
 
-            _ = Task.Run(() => MainLoggingLoop(interval));
+            _btnStart.Enabled = false;
+            _btnStop.Enabled = true;
+
+            // 로깅 중에도 연결/해제 자유롭게 가능하도록 버튼 Enabled 유지
+            _btnTcpConnect.Enabled = true;
+            _btnMksConnect.Enabled = true;
+
+            _ = Task.Run(() => MainLoggingLoop((int)_numInterval.Value));
             UpdateStatus("Logging Started.");
         }
 
-        // STOP 버튼
-        private void BtnStop_Click(object sender, EventArgs e)
+        private void BtnStopLog_Click(object sender, EventArgs e)
         {
             _isLogging = false;
-            _timerElapsed.Stop();
 
-            _tcpService.Stop();
-            _mksService.Stop();
-
-            ToggleInputs(true);
-            UpdateStatus("Stopped.");
-            UpdateLight(_lblTcpLight, Color.Gray);
-            UpdateLight(_lblMksLight, Color.Gray);
-
-            ResetMonitorValues();
+            _btnStart.Enabled = true;
+            _btnStop.Enabled = false;
+            UpdateStatus("Logging Stopped.");
         }
 
         private async Task MainLoggingLoop(int intervalMs)
@@ -132,20 +210,23 @@ namespace PumpTest1
             string fileName = $"Integrated_Log_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
             string fullPath = Path.Combine(_txtPath.Text, fileName);
 
-            // 헤더 작성 (현재 시점의 라벨 사용)
+            // Header 작성
             StringBuilder sbHeader = new StringBuilder();
             sbHeader.Append("Timestamp");
 
+            // FMS Header
             var tcpLabels = _tcpService.ChannelLabels;
             var tcpUnits = _tcpService.ChannelUnits;
             for (int i = 0; i < 4; i++)
             {
                 string lbl = (tcpLabels != null && i < tcpLabels.Length) ? tcpLabels[i] : $"CH{i + 1}";
                 string unt = (tcpUnits != null && i < tcpUnits.Length) ? tcpUnits[i] : "";
+                lbl = lbl.Replace(",", "_"); unt = unt.Replace(",", "_");
                 sbHeader.Append($",FMS_{lbl}({unt})");
             }
-            string mksUnit = _mksService.CurrentUnit;
-            sbHeader.Append($",MKS_Ch1({mksUnit}),MKS_Ch2({mksUnit}),MKS_Ch3({mksUnit})");
+
+            // MKS Header (MKS는 Live Unit이 바뀌면 데이터에도 반영되지만 헤더는 초기값 기준 혹은 고정)
+            sbHeader.Append(",MKS_Ch1,MKS_Ch2,MKS_Ch3,MKS_Unit");
 
             try
             {
@@ -158,37 +239,37 @@ namespace PumpTest1
                     {
                         long loopStart = DateTimeOffset.Now.ToUnixTimeMilliseconds();
 
-                        // 데이터 가져오기
-                        var tcpData = _tcpService.CurrentData;
-                        var mksData = _mksService.CurrentData;
+                        // [핵심] 현재 Live Data 스냅샷 가져오기
+                        // 화면에 ---- 가 떠있다면(연결 안됨) 여기서도 데이터를 0이나 Err로 처리
+                        var tcpData = (_isTcpConnected && _tcpService.Connected) ? _tcpService.CurrentData : null;
+                        var mksData = (_isMksConnected) ? _mksService.CurrentData : null;
 
-                        // UI 업데이트
-                        UpdateUI(tcpData, mksData);
-
-                        // 파일 쓰기
                         StringBuilder sb = new StringBuilder();
                         sb.Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
 
-                        // TCP 값
+                        // TCP Data Logging
                         if (tcpData != null && tcpData.RawValues != null)
                         {
-                            foreach (var val in tcpData.RawValues) sb.Append("," + val);
+                            for (int i = 0; i < 4; i++)
+                                sb.Append("," + ((i < tcpData.RawValues.Count) ? tcpData.RawValues[i] : "0"));
                         }
                         else
                         {
-                            sb.Append(",0,0,0,0"); // 끊겼을 때
+                            // 연결 끊김 -> 0 또는 빈값 처리 (요청에 따라 ---- 대신 0 기록 등)
+                            sb.Append(",0,0,0,0");
                         }
 
-                        // MKS 값
+                        // MKS Data Logging
                         if (mksData != null)
                         {
                             sb.Append($",{(mksData.Ch1.HasValue ? mksData.Ch1.ToString() : "Err")}");
                             sb.Append($",{(mksData.Ch2.HasValue ? mksData.Ch2.ToString() : "Err")}");
                             sb.Append($",{(mksData.Ch3.HasValue ? mksData.Ch3.ToString() : "Err")}");
+                            sb.Append($",{mksData.Unit}");
                         }
                         else
                         {
-                            sb.Append(",Err,Err,Err");
+                            sb.Append(",Err,Err,Err,None");
                         }
 
                         await sw.WriteLineAsync(sb.ToString());
@@ -202,162 +283,299 @@ namespace PumpTest1
             {
                 Invoke(new Action(() => {
                     MessageBox.Show($"File Error: {ex.Message}");
-                    BtnStop_Click(null, null);
+                    if (_isLogging) BtnStopLog_Click(null, null);
                 }));
             }
         }
 
-        private void UpdateUI(DeviceData tcp, MksData mks)
+        // =======================================================================
+        // UI 갱신 (Timer Tick)
+        // =======================================================================
+        private void Timer_Tick(object sender, EventArgs e)
+        {
+            // 1. Live Data UI Update
+            UpdateRealtimeUI();
+
+            // 2. Logging Status
+            if (_isLogging)
+            {
+                TimeSpan ts = DateTime.Now - _logStartTime;
+                _lblElapsed.Text = $"{ts:hh\\:mm\\:ss}";
+            }
+            else
+            {
+                _lblElapsed.Text = "Ready";
+            }
+        }
+
+        private void UpdateRealtimeUI()
         {
             if (IsDisposed) return;
-            Invoke(new Action(() => {
-                // TCP
-                if (_tcpService.Connected && tcp != null)
+
+            // TCP UI Update
+            if (_isTcpConnected)
+            {
+                if (_tcpService.Connected && _tcpService.CurrentData != null)
                 {
                     UpdateLight(_lblTcpLight, Color.Lime);
+                    var d = _tcpService.CurrentData;
                     for (int i = 0; i < 4; i++)
                     {
-                        string val = (i < tcp.RawValues.Count) ? tcp.RawValues[i] : "---";
+                        string val = (i < d.RawValues.Count) ? d.RawValues[i] : "---";
                         string unit = (i < _tcpService.ChannelUnits.Length) ? _tcpService.ChannelUnits[i] : "";
                         if (_tcpValueLabels[i] != null) _tcpValueLabels[i].Text = $"{val} {unit}";
                     }
                 }
                 else
                 {
-                    UpdateLight(_lblTcpLight, Color.Red); // 끊김
+                    // 연결 시도 중이거나 끊김
+                    UpdateLight(_lblTcpLight, Color.Red); // 혹은 Gold
+                    // 만약 연결이 끊겼다면 값을 지운다
+                    if (!_tcpService.Connected) ResetTcpLabelsInternal();
                 }
+            }
+            else
+            {
+                ResetTcpLabelsInternal();
+                UpdateLight(_lblTcpLight, Color.Gray);
+            }
 
-                // MKS
-                if (mks != null)
+            // MKS UI Update
+            if (_isMksConnected)
+            {
+                var d = _mksService.CurrentData;
+                // MKS는 SerialPort.IsOpen 등으로 연결 확인, 데이터가 갱신되고 있는지 확인
+                if (d != null)
                 {
                     UpdateLight(_lblMksLight, Color.Lime);
-                    string u = mks.Unit;
-                    if (_mksValueLabels[1] != null) _mksValueLabels[1].Text = mks.Ch1.HasValue ? $"{mks.Ch1} {u}" : "Err";
-                    if (_mksValueLabels[2] != null) _mksValueLabels[2].Text = mks.Ch2.HasValue ? $"{mks.Ch2} {u}" : "Err";
-                    if (_mksValueLabels[3] != null) _mksValueLabels[3].Text = mks.Ch3.HasValue ? $"{mks.Ch3} {u}" : "Err";
+                    string unit = d.Unit ?? "";
+
+                    if (_mksValueLabels[1] != null) _mksValueLabels[1].Text = (d.Ch1.HasValue ? $"{d.Ch1} {unit}" : $"Err {unit}");
+                    if (_mksValueLabels[2] != null) _mksValueLabels[2].Text = (d.Ch2.HasValue ? $"{d.Ch2} {unit}" : $"Err {unit}");
+                    if (_mksValueLabels[3] != null) _mksValueLabels[3].Text = (d.Ch3.HasValue ? $"{d.Ch3} {unit}" : $"Err {unit}");
                 }
                 else
                 {
-                    UpdateLight(_lblMksLight, Color.Red); // 끊김
+                    UpdateLight(_lblMksLight, Color.Red);
                 }
-            }));
-        }
-
-        // 타이머: 경과 시간 표시
-        private void Timer_Tick(object sender, EventArgs e)
-        {
-            if (_isLogging)
+            }
+            else
             {
-                TimeSpan ts = DateTime.Now - _logStartTime;
-                _lblElapsed.Text = $"Recording: {ts:hh\\:mm\\:ss}";
+                ResetMksLabelsInternal();
+                UpdateLight(_lblMksLight, Color.Gray);
             }
         }
 
-        // 라벨 이름 업데이트 (연결 시 1회 호출됨)
-        private void Tcp_OnChannelInfoReady()
+        // 외부 호출용 초기화 (버튼 클릭 시)
+        private void ResetTcpUI()
         {
-            if (IsDisposed) return;
-            Invoke(new Action(() => {
-                var labels = _tcpService.ChannelLabels;
-                for (int i = 0; i < 4; i++)
-                    if (_tcpNameLabels[i] != null && i < labels.Length)
-                        _tcpNameLabels[i].Text = labels[i] + ":";
-            }));
+            UpdateLight(_lblTcpLight, Color.Gray);
+            ResetTcpLabelsInternal();
         }
 
+        private void ResetMksUI()
+        {
+            UpdateLight(_lblMksLight, Color.Gray);
+            ResetMksLabelsInternal();
+        }
+
+        // 내부 라벨 텍스트 변경
+        private void ResetTcpLabelsInternal()
+        {
+            if (_tcpValueLabels == null) return;
+            foreach (var lbl in _tcpValueLabels) if (lbl != null) lbl.Text = "----";
+        }
+
+        private void ResetMksLabelsInternal()
+        {
+            if (_mksValueLabels == null) return;
+            foreach (var lbl in _mksValueLabels) if (lbl != null) lbl.Text = "----";
+        }
+
+        // =======================================================================
+        // UI 생성 (기존 코드 수정)
+        // =======================================================================
         private void InitializeUnifiedUI()
         {
-            this.Text = "Integrated Pump Monitor";
-            this.Size = new Size(950, 650);
+            this.Text = "Integrated Pump Monitor v3.0 (Live)";
+            this.Size = new Size(1150, 600);
 
-            GroupBox grpSettings = new GroupBox { Text = "Settings", Location = new Point(10, 10), Size = new Size(910, 140), Parent = this };
+            TableLayoutPanel mainLayout = new TableLayoutPanel();
+            mainLayout.Dock = DockStyle.Fill;
+            mainLayout.ColumnCount = 3;
+            mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+            mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+            mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+            mainLayout.Parent = this;
 
-            // 1. TCP UI
-            Panel pnlTcp = new Panel { Location = new Point(10, 20), Size = new Size(250, 110), BorderStyle = BorderStyle.FixedSingle, Parent = grpSettings };
-            new Label { Text = "FMS (TCP)", Location = new Point(5, 5), Font = new Font("Arial", 10, FontStyle.Bold), AutoSize = true, Parent = pnlTcp };
-            new Label { Text = "IP:", Location = new Point(10, 35), AutoSize = true, Parent = pnlTcp };
-            _txtTcpIp = new TextBox { Text = "192.168.1.180", Location = new Point(40, 32), Width = 100, Parent = pnlTcp };
-            new Label { Text = "Port:", Location = new Point(150, 35), AutoSize = true, Parent = pnlTcp };
-            _txtTcpPort = new TextBox { Text = "101", Location = new Point(185, 32), Width = 50, Parent = pnlTcp };
+            // [Col 1] FMS
+            GroupBox grpFms = new GroupBox { Text = "FMS System (TCP)", Dock = DockStyle.Fill, Font = new Font("Arial", 10, FontStyle.Bold) };
+            mainLayout.Controls.Add(grpFms, 0, 0);
 
-            // 2. MKS UI
-            Panel pnlMks = new Panel { Location = new Point(270, 20), Size = new Size(260, 110), BorderStyle = BorderStyle.FixedSingle, Parent = grpSettings };
-            new Label { Text = "MKS 946", Location = new Point(5, 5), Font = new Font("Arial", 10, FontStyle.Bold), AutoSize = true, Parent = pnlMks };
-            new Label { Text = "Port:", Location = new Point(10, 35), AutoSize = true, Parent = pnlMks };
-            _cboMksPort = new ComboBox { Location = new Point(50, 32), Width = 80, Parent = pnlMks };
-            _btnMksRefresh = new Button { Text = "R", Location = new Point(135, 31), Width = 30, Height = 23, Parent = pnlMks };
+            Panel pnlFmsTop = new Panel { Location = new Point(10, 25), Size = new Size(330, 110), BorderStyle = BorderStyle.FixedSingle, Parent = grpFms };
+            new Label { Text = "IP:", Location = new Point(10, 15), AutoSize = true, Font = new Font("Arial", 9), Parent = pnlFmsTop };
+            _txtTcpIp = new TextBox { Text = "192.168.1.180", Location = new Point(40, 12), Width = 110, Font = new Font("Arial", 9), Parent = pnlFmsTop };
+            new Label { Text = "Port:", Location = new Point(160, 15), AutoSize = true, Font = new Font("Arial", 9), Parent = pnlFmsTop };
+            _txtTcpPort = new TextBox { Text = "101", Location = new Point(200, 12), Width = 50, Font = new Font("Arial", 9), Parent = pnlFmsTop };
 
-            // 포트 새로고침 및 기본값 자동 선택 로직
-            _btnMksRefresh.Click += (s, e) => {
-                _cboMksPort.Items.Clear();
-                string[] ports = SerialPort.GetPortNames();
-                _cboMksPort.Items.AddRange(ports);
-                // 기본 포트 자동 선택
-                int idx = -1;
-                for (int i = 0; i < ports.Length; i++)
-                {
-                    if (ports[i].Equals(_defaultMksPort, StringComparison.OrdinalIgnoreCase)) idx = i;
-                }
-                if (idx >= 0) _cboMksPort.SelectedIndex = idx;
-                else if (_cboMksPort.Items.Count > 0) _cboMksPort.SelectedIndex = 0;
-            };
-            _btnMksRefresh.PerformClick(); // 시작 시 자동 실행
+            _btnTcpConnect = new Button { Text = "CONNECT FMS", Location = new Point(10, 45), Size = new Size(180, 50), BackColor = Color.LightGray, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlFmsTop };
+            _btnTcpConnect.Click += BtnTcpConnect_Click;
 
-            new Label { Text = "Unit:", Location = new Point(10, 70), AutoSize = true, Parent = pnlMks };
-            _cboMksUnit = new ComboBox { Location = new Point(50, 67), Width = 80, Parent = pnlMks };
-            _cboMksUnit.Items.AddRange(new object[] { "PASCAL", "TORR", "MBAR", "MICRON" });
-            _cboMksUnit.SelectedIndex = 0;
-            _btnMksUnitApply = new Button { Text = "Set", Location = new Point(135, 66), Width = 50, Parent = pnlMks };
-            _btnMksUnitApply.Click += BtnMksUnitApply_Click;
+            new Label { Text = "STATUS", Location = new Point(200, 50), AutoSize = true, Font = new Font("Arial", 8), Parent = pnlFmsTop };
+            _lblTcpLight = new Label { Location = new Point(210, 70), Size = new Size(20, 20), BackColor = Color.Gray, BorderStyle = BorderStyle.FixedSingle, Parent = pnlFmsTop };
 
-            // 3. Common UI
-            Panel pnlCommon = new Panel { Location = new Point(540, 20), Size = new Size(360, 110), BorderStyle = BorderStyle.FixedSingle, Parent = grpSettings };
-            new Label { Text = "Control", Location = new Point(5, 5), Font = new Font("Arial", 10, FontStyle.Bold), AutoSize = true, Parent = pnlCommon };
-            new Label { Text = "Path:", Location = new Point(10, 35), AutoSize = true, Parent = pnlCommon };
-            _txtPath = new TextBox { Text = AppDomain.CurrentDomain.BaseDirectory, Location = new Point(50, 32), Width = 180, Parent = pnlCommon };
-            _btnBrowse = new Button { Text = "...", Location = new Point(235, 31), Width = 30, Parent = pnlCommon };
-            _btnBrowse.Click += (s, e) => { using (var d = new FolderBrowserDialog()) if (d.ShowDialog() == DialogResult.OK) _txtPath.Text = d.SelectedPath; };
-            new Label { Text = "Interval:", Location = new Point(10, 70), AutoSize = true, Parent = pnlCommon };
-            _numInterval = new NumericUpDown { Minimum = 100, Maximum = 60000, Value = 500, Increment = 100, Location = new Point(70, 68), Width = 60, Parent = pnlCommon };
-            _btnStart = new Button { Text = "START", Location = new Point(260, 10), Size = new Size(85, 40), BackColor = Color.LightGreen, Parent = pnlCommon };
-            _btnStart.Click += BtnStart_Click;
-            _btnStop = new Button { Text = "STOP", Location = new Point(260, 60), Size = new Size(85, 40), BackColor = Color.LightPink, Enabled = false, Parent = pnlCommon };
-            _btnStop.Click += BtnStop_Click;
-
-            // Monitor UI
-            GroupBox grpMonitor = new GroupBox { Text = "Monitor", Location = new Point(10, 160), Size = new Size(910, 400), Parent = this };
-            _lblElapsed = new Label { Text = "Ready", Location = new Point(720, 30), AutoSize = true, Font = new Font("Arial", 12, FontStyle.Bold), ForeColor = Color.DarkSlateBlue, Parent = grpMonitor };
-            _lblTcpLight = new Label { Location = new Point(160, 32), Size = new Size(20, 20), BackColor = Color.Gray, BorderStyle = BorderStyle.FixedSingle, Parent = grpMonitor };
-            _lblMksLight = new Label { Location = new Point(640, 32), Size = new Size(20, 20), BackColor = Color.Gray, BorderStyle = BorderStyle.FixedSingle, Parent = grpMonitor };
-
-            new Label { Text = "[ FMS ]", Location = new Point(20, 30), AutoSize = true, Font = new Font("Arial", 14, FontStyle.Bold | FontStyle.Underline), Parent = grpMonitor };
             _tcpNameLabels = new Label[4]; _tcpValueLabels = new Label[4];
-            int y = 70;
+            int y = 150;
             for (int i = 0; i < 4; i++)
             {
-                _tcpNameLabels[i] = new Label { Text = $"CH{i + 1}:", Location = new Point(30, y), AutoSize = true, Font = new Font("Arial", 14), Parent = grpMonitor };
-                _tcpValueLabels[i] = new Label { Text = "---", Location = new Point(250, y), AutoSize = true, Font = new Font("Arial", 16, FontStyle.Bold), ForeColor = Color.Blue, Parent = grpMonitor };
-                y += 50;
+                _tcpNameLabels[i] = new Label { Text = $"CH{i + 1}", Location = new Point(20, y), AutoSize = true, Font = new Font("Arial", 12), Parent = grpFms };
+                _tcpValueLabels[i] = new Label { Text = "----", Location = new Point(100, y), AutoSize = true, Font = new Font("Arial", 14, FontStyle.Bold), ForeColor = Color.Blue, Parent = grpFms };
+                y += 60;
             }
 
-            new Label { Text = "[ MKS 946 ]", Location = new Point(500, 30), AutoSize = true, Font = new Font("Arial", 14, FontStyle.Bold | FontStyle.Underline), Parent = grpMonitor };
+            // [Col 2] MKS
+            GroupBox grpMks = new GroupBox { Text = "MKS 946 (Serial)", Dock = DockStyle.Fill, Font = new Font("Arial", 10, FontStyle.Bold) };
+            mainLayout.Controls.Add(grpMks, 1, 0);
+
+            Panel pnlMksTop = new Panel { Location = new Point(10, 25), Size = new Size(330, 150), BorderStyle = BorderStyle.FixedSingle, Parent = grpMks };
+            new Label { Text = "Port:", Location = new Point(10, 15), AutoSize = true, Font = new Font("Arial", 9), Parent = pnlMksTop };
+            _cboMksPort = new ComboBox { Location = new Point(50, 12), Width = 100, Font = new Font("Arial", 9), Parent = pnlMksTop };
+
+            _btnMksRefresh = new Button { Text = "R", Location = new Point(155, 11), Width = 30, Height = 23, Font = new Font("Arial", 8), Parent = pnlMksTop };
+            _btnMksRefresh.Click += (s, e) => {
+                _cboMksPort.Items.Clear();
+                _cboMksPort.Items.AddRange(SerialPort.GetPortNames());
+                if (_cboMksPort.Items.Count > 0) _cboMksPort.SelectedIndex = _cboMksPort.Items.Count - 1;
+            };
+
+            new Label { Text = "Unit:", Location = new Point(10, 45), AutoSize = true, Font = new Font("Arial", 9), Parent = pnlMksTop };
+            _cboMksUnit = new ComboBox { Location = new Point(50, 42), Width = 80, Font = new Font("Arial", 9), Parent = pnlMksTop };
+            _cboMksUnit.Items.AddRange(new object[] { "PASCAL", "TORR", "MBAR", "MICRON" });
+            _cboMksUnit.SelectedIndex = 0;
+            _btnMksUnitApply = new Button { Text = "Set", Location = new Point(135, 41), Width = 50, Height = 25, Font = new Font("Arial", 9), Parent = pnlMksTop };
+            _btnMksUnitApply.Click += BtnMksUnitApply_Click;
+
+            _btnMksConnect = new Button { Text = "CONNECT MKS", Location = new Point(10, 80), Size = new Size(180, 50), BackColor = Color.LightGray, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlMksTop };
+            _btnMksConnect.Click += BtnMksConnect_Click;
+
+            new Label { Text = "STATUS", Location = new Point(200, 85), AutoSize = true, Font = new Font("Arial", 8), Parent = pnlMksTop };
+            _lblMksLight = new Label { Location = new Point(210, 105), Size = new Size(20, 20), BackColor = Color.Gray, BorderStyle = BorderStyle.FixedSingle, Parent = pnlMksTop };
+
+            // [변경] 큰 유닛 라벨 제거, 대신 개별 수치 라벨 옆에 표시
             _mksValueLabels = new Label[4];
-            y = 70;
+            y = 190; // 위치 조정
             for (int i = 1; i <= 3; i++)
             {
-                new Label { Text = $"Channel {i}:", Location = new Point(510, y), AutoSize = true, Font = new Font("Arial", 14), Parent = grpMonitor };
-                _mksValueLabels[i] = new Label { Text = "---", Location = new Point(650, y), AutoSize = true, Font = new Font("Arial", 16, FontStyle.Bold), ForeColor = Color.DarkRed, Parent = grpMonitor };
-                y += 50;
+                new Label { Text = $"CH{i}", Location = new Point(20, y), AutoSize = true, Font = new Font("Arial", 12), Parent = grpMks };
+                _mksValueLabels[i] = new Label
+                {
+                    Text = "----",
+                    Location = new Point(80, y),
+                    Size = new Size(250, 30), // 너비를 넓혀서 유닛까지 표시
+                    AutoSize = false,
+                    TextAlign = ContentAlignment.MiddleLeft, // 왼쪽 정렬
+                    Font = new Font("Arial", 14, FontStyle.Bold), // 폰트 사이즈 조정
+                    ForeColor = Color.DarkRed,
+                    Parent = grpMks
+                };
+                y += 60;
             }
 
-            _lblStatus = new Label { Dock = DockStyle.Bottom, Height = 30, Text = "Ready", BackColor = Color.LightGray, TextAlign = ContentAlignment.MiddleLeft, Parent = this };
+            // [Col 3] Logging
+            GroupBox grpLog = new GroupBox { Text = "Data Logging", Dock = DockStyle.Fill, Font = new Font("Arial", 10, FontStyle.Bold) };
+            mainLayout.Controls.Add(grpLog, 2, 0);
+
+            Panel pnlLog = new Panel { Location = new Point(20, 30), Size = new Size(300, 250), BorderStyle = BorderStyle.FixedSingle, Parent = grpLog };
+
+            new Label { Text = "Save Path:", Location = new Point(10, 15), AutoSize = true, Font = new Font("Arial", 9), Parent = pnlLog };
+            _txtPath = new TextBox { Text = AppDomain.CurrentDomain.BaseDirectory, Location = new Point(10, 35), Width = 230, Font = new Font("Arial", 8), Parent = pnlLog };
+            _btnBrowse = new Button { Text = "...", Location = new Point(245, 34), Width = 30, Height = 22, Parent = pnlLog };
+            _btnBrowse.Click += (s, e) => { using (var d = new FolderBrowserDialog()) if (d.ShowDialog() == DialogResult.OK) _txtPath.Text = d.SelectedPath; };
+
+            _btnOpenFolder = new Button { Text = "Open Folder", Location = new Point(10, 65), Width = 265, Height = 25, Font = new Font("Arial", 9), Parent = pnlLog };
+            _btnOpenFolder.Click += (s, e) => { try { Process.Start("explorer.exe", _txtPath.Text); } catch { } };
+
+            new Label { Text = "Interval (ms):", Location = new Point(10, 105), AutoSize = true, Font = new Font("Arial", 9), Parent = pnlLog };
+            _numInterval = new NumericUpDown { Minimum = 100, Maximum = 60000, Value = 500, Increment = 100, Location = new Point(100, 103), Width = 80, Font = new Font("Arial", 9), Parent = pnlLog };
+
+            _btnStart = new Button { Text = "REC START", Location = new Point(10, 145), Size = new Size(130, 50), BackColor = Color.LightGreen, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlLog };
+            _btnStart.Click += BtnStartLog_Click;
+
+            _btnStop = new Button { Text = "REC STOP", Location = new Point(145, 145), Size = new Size(130, 50), BackColor = Color.LightPink, Enabled = false, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlLog };
+            _btnStop.Click += BtnStopLog_Click;
+
+            _lblElapsed = new Label { Text = "Ready", Location = new Point(100, 210), AutoSize = true, Font = new Font("Arial", 11, FontStyle.Bold), ForeColor = Color.DarkSlateBlue, Parent = pnlLog };
+            _lblStatus = new Label { Dock = DockStyle.Bottom, Height = 30, Text = "Ready", BackColor = Color.FromArgb(240, 240, 240), TextAlign = ContentAlignment.MiddleLeft, Parent = this };
+
+            _btnMksRefresh.PerformClick();
+        }
+
+        private void LoadSettings()
+        {
+            try
+            {
+                if (File.Exists(_configFile))
+                {
+                    foreach (var line in File.ReadAllLines(_configFile))
+                    {
+                        var p = line.Split('='); if (p.Length < 2) continue;
+                        string k = p[0].Trim(), v = p[1].Trim();
+                        if (k == "TCP_IP") _txtTcpIp.Text = v;
+                        else if (k == "TCP_PORT") _txtTcpPort.Text = v;
+                        else if (k == "LOG_PATH" && Directory.Exists(v)) _txtPath.Text = v;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void SaveSettings()
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine($"MKS_PORT={_cboMksPort.Text}");
+                sb.AppendLine($"TCP_IP={_txtTcpIp.Text}");
+                sb.AppendLine($"TCP_PORT={_txtTcpPort.Text}");
+                sb.AppendLine($"LOG_PATH={_txtPath.Text}");
+                File.WriteAllText(_configFile, sb.ToString());
+            }
+            catch { }
+        }
+
+        private void Form1_Load(object sender, EventArgs e)
+        {
+            // 프로그램 시작 시 타이머 가동 (UI 업데이트용)
+            _timerElapsed.Start();
+
+            // 시작 시 자동 연결 (선택 사항)
+            _btnTcpConnect.PerformClick();
+            if (_cboMksPort.Items.Count > 0) _btnMksConnect.PerformClick();
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            SaveSettings();
+            _isLogging = false;
+            _tcpService?.Stop();
+            _mksService?.Stop();
+            base.OnFormClosing(e);
         }
 
         private void UpdateStatus(string msg) { if (!IsDisposed) Invoke(new Action(() => _lblStatus.Text = msg)); }
         private void UpdateLight(Label light, Color color) { if (!IsDisposed && light != null) Invoke(new Action(() => light.BackColor = color)); }
-        private void ToggleInputs(bool en) { _txtTcpIp.Enabled = _txtTcpPort.Enabled = _cboMksPort.Enabled = _btnMksRefresh.Enabled = en; _btnMksUnitApply.Enabled = _cboMksUnit.Enabled = en; _txtPath.Enabled = _btnBrowse.Enabled = _numInterval.Enabled = en; _btnStart.Enabled = en; _btnStop.Enabled = !en; }
         private void BtnMksUnitApply_Click(object sender, EventArgs e) { if (!string.IsNullOrEmpty(_cboMksPort.Text)) _mksService.SetUnit(_cboMksUnit.Text, _cboMksPort.Text); }
-        private void ResetMonitorValues() { /* 필요시 구현 */ }
-        protected override void OnFormClosing(FormClosingEventArgs e) { _isLogging = false; _tcpService?.Stop(); _mksService?.Stop(); base.OnFormClosing(e); }
+
+        private void ToggleFmsInputs(bool en) { _txtTcpIp.Enabled = _txtTcpPort.Enabled = en; }
+        private void ToggleMksInputs(bool en) { _cboMksPort.Enabled = _btnMksRefresh.Enabled = en; }
+
+        private void Tcp_OnChannelInfoReady()
+        {
+            if (IsDisposed) return;
+            Invoke(new Action(() => {
+                var l = _tcpService.ChannelLabels;
+                for (int i = 0; i < 4; i++) if (_tcpNameLabels[i] != null && i < l.Length) _tcpNameLabels[i].Text = l[i];
+            }));
+        }
     }
 }
