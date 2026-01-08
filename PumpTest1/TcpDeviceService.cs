@@ -6,8 +6,9 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Text.RegularExpressions;
 
-namespace PumpTest1  // ★ 프로젝트 이름으로 통일
+namespace PumpTest1
 {
+    // [핵심] 이 클래스가 있어야 에러가 안 납니다.
     public class DeviceData
     {
         public string Timestamp { get; set; }
@@ -22,24 +23,28 @@ namespace PumpTest1  // ★ 프로젝트 이름으로 통일
     {
         public string IpAddress { get; set; } = "192.168.1.180";
         public int Port { get; set; } = 101;
-        public int IntervalMs { get; set; } = 1000;
-        public string LogFolderPath { get; set; } = AppDomain.CurrentDomain.BaseDirectory;
+        public int IntervalMs { get; set; } = 500;
 
         private bool _isRunning = false;
         private TcpClient _client;
         private NetworkStream _stream;
-        private StreamWriter _csvWriter;
 
-        public event Action<DeviceData> OnDataReceived;
+        // UI에서 가져다 쓸 데이터
+        public DeviceData CurrentData { get; private set; }
+        public string[] ChannelLabels { get; private set; } = new string[] { "CH1", "CH2", "CH3", "CH4" }; // 기본값
+        public string[] ChannelUnits { get; private set; } = new string[] { "", "", "", "" };
+
+        public bool Connected => _client != null && _client.Connected;
+
         public event Action<string> OnError;
         public event Action<string> OnStatusChanged;
-        public event Action<string[]> OnChannelInfoReceived;
+        public event Action OnChannelInfoReady;
 
         public void Start()
         {
             if (_isRunning) return;
             _isRunning = true;
-            Task.Run(CommunicationLoop);
+            Task.Run(CommunicationLoop); // 별도 스레드에서 통신 시작
         }
 
         public void Stop()
@@ -51,104 +56,141 @@ namespace PumpTest1  // ★ 프로젝트 이름으로 통일
 
         private async Task CommunicationLoop()
         {
-            if (!Directory.Exists(LogFolderPath))
-            {
-                try { Directory.CreateDirectory(LogFolderPath); }
-                catch (Exception ex) { OnError?.Invoke($"Dir Error: {ex.Message}"); _isRunning = false; return; }
-            }
-
-            try
-            {
-                OnStatusChanged?.Invoke($"Connecting to {IpAddress}:{Port}...");
-                _client = new TcpClient();
-                var connectTask = _client.ConnectAsync(IpAddress, Port);
-                if (await Task.WhenAny(connectTask, Task.Delay(3000)) != connectTask) throw new Exception("Timeout");
-                await connectTask;
-                _stream = _client.GetStream();
-                _stream.ReadTimeout = 3000;
-                OnStatusChanged?.Invoke("Connected.");
-            }
-            catch (Exception ex) { OnError?.Invoke($"Conn Failed: {ex.Message}"); _isRunning = false; Cleanup(); return; }
-
-            string[] headers = await GetChannelMetadata();
-            OnChannelInfoReceived?.Invoke(headers);
-
-            string fileName = $"tcp_log_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
-            string fullPath = Path.Combine(LogFolderPath, fileName);
-
-            try
-            {
-                var fs = new FileStream(fullPath, FileMode.Create, FileAccess.Write, FileShare.Read);
-                _csvWriter = new StreamWriter(fs, Encoding.UTF8) { AutoFlush = true };
-                await _csvWriter.WriteLineAsync("Timestamp," + string.Join(",", headers));
-                OnStatusChanged?.Invoke($"Logging to {fileName}");
-            }
-            catch (Exception ex) { OnError?.Invoke($"CSV Error: {ex.Message}"); _isRunning = false; Cleanup(); return; }
-
-            byte[] buffer = new byte[1024];
-
+            // 무한 루프: 프로그램이 꺼지거나 Stop()할 때까지 계속 재연결 시도
             while (_isRunning)
             {
-                long start = DateTimeOffset.Now.ToUnixTimeMilliseconds();
                 try
                 {
-                    if (_client != null && _client.Connected)
+                    // 1. 연결이 안 되어 있다면 연결 시도
+                    if (!Connected)
                     {
-                        if (_client.Available > 0) await _stream.ReadAsync(buffer, 0, _client.Available);
+                        OnStatusChanged?.Invoke($"Connecting to {IpAddress}:{Port}...");
+                        _client = new TcpClient();
+
+                        // 타임아웃(3초)을 건 연결 시도
+                        var connectTask = _client.ConnectAsync(IpAddress, Port);
+                        if (await Task.WhenAny(connectTask, Task.Delay(3000)) != connectTask)
+                        {
+                            throw new Exception("Connection Timeout");
+                        }
+                        await connectTask;
+
+                        _stream = _client.GetStream();
+                        _stream.ReadTimeout = 3000; // 읽기 타임아웃
+                        OnStatusChanged?.Invoke("Connected.");
+
+                        // 연결 성공 직후 라벨(adil?)과 단위(auiu?) 가져오기
+                        await FetchMetadata();
+                        OnChannelInfoReady?.Invoke();
+                    }
+
+                    // 2. 데이터 주기적 요청 (ar)
+                    if (Connected)
+                    {
+                        long start = DateTimeOffset.Now.ToUnixTimeMilliseconds();
+
+                        // 쓰레기 데이터 비우기
+                        if (_client.Available > 0)
+                        {
+                            byte[] trash = new byte[_client.Available];
+                            await _stream.ReadAsync(trash, 0, trash.Length);
+                        }
+
+                        // 데이터 요청 명령 전송
                         byte[] cmd = Encoding.ASCII.GetBytes("ar\r\n");
                         await _stream.WriteAsync(cmd, 0, cmd.Length);
-                        string response = await ReadLineAsync(_stream);
-                        if (response.Contains("READ:")) ProcessReadData(response);
-                    }
-                    else throw new Exception("Disconnected");
-                }
-                catch (Exception ex) { OnError?.Invoke($"Error: {ex.Message}"); _isRunning = false; }
 
-                int wait = IntervalMs - (int)(DateTimeOffset.Now.ToUnixTimeMilliseconds() - start);
-                if (wait > 0) await Task.Delay(wait);
+                        // 응답 읽기 (최대 2초 대기)
+                        string response = await ReadLineAsync(_stream, 2000);
+
+                        if (!string.IsNullOrEmpty(response) && response.Contains("READ:"))
+                        {
+                            ProcessReadData(response);
+                        }
+
+                        // 주기(Interval) 맞추기
+                        int elapsed = (int)(DateTimeOffset.Now.ToUnixTimeMilliseconds() - start);
+                        int wait = IntervalMs - elapsed;
+                        if (wait > 0) await Task.Delay(wait);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // 에러 발생 시 로그 찍고, 잠시 대기 후 재시도
+                    OnError?.Invoke($"Error: {ex.Message}");
+                    Cleanup();
+                    await Task.Delay(3000); // 3초 뒤 재접속 시도
+                }
             }
-            Cleanup();
         }
 
-        private async Task<string[]> GetChannelMetadata()
+        private async Task FetchMetadata()
         {
-            string[] labels = { "CH1", "CH2", "CH3", "CH4" };
-            string[] units = { "", "", "", "" };
             try
             {
-                OnStatusChanged?.Invoke("Reading Meta...");
+                // 라벨 읽기 (adil?)
+                OnStatusChanged?.Invoke("Reading Labels...");
                 byte[] cmd = Encoding.ASCII.GetBytes("adil?\r\n");
                 await _stream.WriteAsync(cmd, 0, cmd.Length);
-                string lResp = await ReadMultiLinesAsync(500);
-                foreach (Match m in Regex.Matches(lResp, @"CH(\d)\s+LABEL:\s*""([^""]+)"""))
-                    if (int.TryParse(m.Groups[1].Value, out int i) && i >= 1 && i <= 4) labels[i - 1] = m.Groups[2].Value.Trim();
 
+                string lResp = await ReadMultiLinesAsync(1000); // 1초간 수집
+                foreach (Match m in Regex.Matches(lResp, @"CH(\d)\s+LABEL:\s*""([^""]+)"""))
+                    if (int.TryParse(m.Groups[1].Value, out int i) && i >= 1 && i <= 4)
+                        ChannelLabels[i - 1] = m.Groups[2].Value.Trim();
+
+                // 단위 읽기 (auiu?)
+                OnStatusChanged?.Invoke("Reading Units...");
                 cmd = Encoding.ASCII.GetBytes("auiu?\r\n");
                 await _stream.WriteAsync(cmd, 0, cmd.Length);
-                string uResp = await ReadMultiLinesAsync(500);
-                foreach (Match m in Regex.Matches(uResp, @"CH(\d)\s+UNITS\s+STR:\s*([^\r\n]+)"))
-                    if (int.TryParse(m.Groups[1].Value, out int i) && i >= 1 && i <= 4) units[i - 1] = m.Groups[2].Value.Trim();
-            }
-            catch { }
 
-            string[] ret = new string[4];
-            for (int i = 0; i < 4; i++) ret[i] = $"{labels[i]}{(string.IsNullOrEmpty(units[i]) ? "" : $"({units[i]})")}";
-            return ret;
+                string uResp = await ReadMultiLinesAsync(1000); // 1초간 수집
+                foreach (Match m in Regex.Matches(uResp, @"CH(\d)\s+UNITS\s+STR:\s*([^\r\n]+)"))
+                    if (int.TryParse(m.Groups[1].Value, out int i) && i >= 1 && i <= 4)
+                        ChannelUnits[i - 1] = m.Groups[2].Value.Trim();
+
+                OnStatusChanged?.Invoke("Metadata Ready.");
+            }
+            catch (Exception ex)
+            {
+                OnStatusChanged?.Invoke($"Meta Fail: {ex.Message}");
+            }
         }
 
-        private async Task<string> ReadLineAsync(NetworkStream s)
+        private async Task<string> ReadLineAsync(NetworkStream s, int timeoutMs)
         {
-            List<byte> b = new List<byte>(); byte[] buf = new byte[1];
-            while (true) { if (await s.ReadAsync(buf, 0, 1) == 0 || buf[0] == '\n') break; b.Add(buf[0]); }
-            return Encoding.ASCII.GetString(b.ToArray()).Trim();
+            // 타임아웃 기능이 포함된 한 줄 읽기
+            using (var cts = new System.Threading.CancellationTokenSource(timeoutMs))
+            {
+                try
+                {
+                    List<byte> b = new List<byte>();
+                    byte[] buf = new byte[1];
+                    while (true)
+                    {
+                        int read = await s.ReadAsync(buf, 0, 1, cts.Token);
+                        if (read == 0) break;
+                        if (buf[0] == '\n') break;
+                        b.Add(buf[0]);
+                    }
+                    return Encoding.ASCII.GetString(b.ToArray()).Trim();
+                }
+                catch { return null; }
+            }
         }
 
         private async Task<string> ReadMultiLinesAsync(int ms)
         {
-            StringBuilder sb = new StringBuilder(); byte[] buf = new byte[4096]; long s = DateTimeOffset.Now.ToUnixTimeMilliseconds();
+            // 지정된 시간(ms) 동안 들어오는 모든 데이터를 읽음
+            StringBuilder sb = new StringBuilder();
+            byte[] buf = new byte[4096];
+            long s = DateTimeOffset.Now.ToUnixTimeMilliseconds();
             while (DateTimeOffset.Now.ToUnixTimeMilliseconds() - s < ms)
             {
-                if (_client.Available > 0) { int r = await _stream.ReadAsync(buf, 0, buf.Length); sb.Append(Encoding.ASCII.GetString(buf, 0, r)); }
+                if (_client != null && _client.Available > 0)
+                {
+                    int r = await _stream.ReadAsync(buf, 0, buf.Length);
+                    sb.Append(Encoding.ASCII.GetString(buf, 0, r));
+                }
                 else await Task.Delay(50);
             }
             return sb.ToString();
@@ -156,16 +198,41 @@ namespace PumpTest1  // ★ 프로젝트 이름으로 통일
 
         private void ProcessReadData(string res)
         {
-            var m = Regex.Match(res, @"READ:([^;]+)"); if (!m.Success) return;
+            // 예: READ: 1.23, 4.56, !RANGE!, 0.00;
+            var m = Regex.Match(res, @"READ:([^;]+)");
+            if (!m.Success) return;
+
             string[] raw = m.Groups[1].Value.Split(',');
             string now = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-            List<string> clean = new List<string>(); List<double> vals = new List<double>();
-            foreach (var r in raw) { string c = r.Trim(); if (c == "!RANGE!") c = "0"; clean.Add(c); }
-            for (int i = 0; i < 4; i++) vals.Add(double.TryParse((i < clean.Count ? clean[i] : "0"), out double d) ? d : 0);
+            List<string> clean = new List<string>();
+            List<double> vals = new List<double>();
 
-            if (_csvWriter?.BaseStream.CanWrite == true) _csvWriter.WriteLine($"{now},{string.Join(",", clean.GetRange(0, Math.Min(4, clean.Count)))}");
-            OnDataReceived?.Invoke(new DeviceData { Timestamp = now, V1 = vals[0], V2 = vals[1], V3 = vals[2], V4 = vals[3], RawValues = clean });
+            foreach (var r in raw)
+            {
+                string c = r.Trim();
+                if (c == "!RANGE!") c = "0"; // 에러 값 처리
+                clean.Add(c);
+            }
+
+            for (int i = 0; i < 4; i++)
+                vals.Add(double.TryParse((i < clean.Count ? clean[i] : "0"), out double d) ? d : 0);
+
+            CurrentData = new DeviceData
+            {
+                Timestamp = now,
+                V1 = vals[0],
+                V2 = vals[1],
+                V3 = vals[2],
+                V4 = vals[3],
+                RawValues = clean
+            };
         }
-        private void Cleanup() { try { _client?.Close(); _csvWriter?.Close(); } catch { } }
+
+        private void Cleanup()
+        {
+            try { _stream?.Close(); } catch { }
+            try { _client?.Close(); } catch { }
+            _client = null;
+        }
     }
 }
