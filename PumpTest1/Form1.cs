@@ -15,7 +15,7 @@ namespace PumpTest1
 
         private bool _isLogging = false;
 
-        // 연결 상태 플래그 (UI 버튼 상태 관리용)
+        // 연결 상태 플래그
         private bool _isTcpConnected = false;
         private bool _isMksConnected = false;
 
@@ -35,7 +35,6 @@ namespace PumpTest1
         private Button _btnMksRefresh, _btnMksUnitApply;
         private Button _btnMksConnect;
         private Label _lblMksLight;
-        // private Label _lblMksCurrentUnit; // [삭제] 개별 표시로 변경
         private Label[] _mksValueLabels;
 
         // [Logging]
@@ -72,9 +71,10 @@ namespace PumpTest1
                 UpdateLight(_lblMksLight, Color.Red);
             };
 
-            // [핵심] UI 갱신용 타이머 (0.5초 간격)
+            // UI 갱신용 타이머 (시작 시 바로 가동)
             _timerElapsed = new System.Windows.Forms.Timer { Interval = 500 };
             _timerElapsed.Tick += Timer_Tick;
+            _timerElapsed.Start();
 
             // 설정 로드
             LoadSettings();
@@ -87,23 +87,23 @@ namespace PumpTest1
         {
             if (_isTcpConnected)
             {
-                // DISCONNECT 로직
+                // DISCONNECT
                 _tcpService.Stop();
                 _isTcpConnected = false;
 
-                _btnTcpConnect.Text = "CONNECT FMS";
+                _btnTcpConnect.Text = "CONNECT";
                 _btnTcpConnect.BackColor = Color.LightGray;
 
                 ToggleFmsInputs(true);
-                ResetTcpUI(); // [중요] 즉시 화면 초기화
+                ResetTcpUI();
                 UpdateStatus("FMS Disconnected.");
             }
             else
             {
-                // CONNECT 로직
+                // CONNECT
                 _tcpService.IpAddress = _txtTcpIp.Text;
                 if (int.TryParse(_txtTcpPort.Text, out int port)) _tcpService.Port = port;
-                _tcpService.IntervalMs = 500; // Live Monitoring 기본 속도
+                _tcpService.IntervalMs = 500;
 
                 _tcpService.Start();
                 _isTcpConnected = true;
@@ -112,9 +112,12 @@ namespace PumpTest1
                 _btnTcpConnect.BackColor = Color.Salmon;
 
                 ToggleFmsInputs(false);
-                UpdateLight(_lblTcpLight, Color.Gold); // 연결 시도 중 노란불
+                UpdateLight(_lblTcpLight, Color.Gold);
 
                 UpdateStatus("FMS Connecting...");
+
+                if (!_timerElapsed.Enabled) _timerElapsed.Start();
+
                 await WaitLabelsAsync();
             }
         }
@@ -126,24 +129,24 @@ namespace PumpTest1
         {
             if (_isMksConnected)
             {
-                // DISCONNECT 로직
+                // DISCONNECT
                 _mksService.Stop();
                 _isMksConnected = false;
 
-                _btnMksConnect.Text = "CONNECT MKS";
+                _btnMksConnect.Text = "CONNECT";
                 _btnMksConnect.BackColor = Color.LightGray;
 
                 ToggleMksInputs(true);
-                ResetMksUI(); // [중요] 즉시 화면 초기화
+                ResetMksUI();
                 UpdateStatus("MKS Disconnected.");
             }
             else
             {
-                // CONNECT 로직
+                // CONNECT
                 if (string.IsNullOrEmpty(_cboMksPort.Text)) { MessageBox.Show("Select MKS Port"); return; }
 
                 _mksService.PortName = _cboMksPort.Text;
-                _mksService.IntervalMs = 500; // Live Monitoring 기본 속도
+                _mksService.IntervalMs = 500;
 
                 _mksService.Start();
                 _isMksConnected = true;
@@ -152,12 +155,13 @@ namespace PumpTest1
                 _btnMksConnect.BackColor = Color.Salmon;
 
                 ToggleMksInputs(false);
-                UpdateLight(_lblMksLight, Color.Gold); // 연결 시도 중 노란불
+                UpdateLight(_lblMksLight, Color.Gold);
                 UpdateStatus("MKS Connecting...");
+
+                if (!_timerElapsed.Enabled) _timerElapsed.Start();
             }
         }
 
-        // FMS 라벨 업데이트 대기
         private async Task WaitLabelsAsync()
         {
             int retry = 0;
@@ -174,7 +178,6 @@ namespace PumpTest1
         // =======================================================================
         private void BtnStartLog_Click(object sender, EventArgs e)
         {
-            // 하나라도 연결되어 있어야 로깅 가능 (원하는 경우 둘 다 끊겨도 로깅은 돌릴 수 있으나 데이터가 없으므로 체크)
             if (!_isTcpConnected && !_isMksConnected)
             {
                 if (MessageBox.Show("No devices connected. Start logging anyway?", "Warning", MessageBoxButtons.YesNo) == DialogResult.No)
@@ -183,12 +186,12 @@ namespace PumpTest1
 
             _isLogging = true;
             _logStartTime = DateTime.Now;
-            _timerElapsed.Start(); // 타이머 확실히 시작
+
+            if (!_timerElapsed.Enabled) _timerElapsed.Start();
 
             _btnStart.Enabled = false;
             _btnStop.Enabled = true;
 
-            // 로깅 중에도 연결/해제 자유롭게 가능하도록 버튼 Enabled 유지
             _btnTcpConnect.Enabled = true;
             _btnMksConnect.Enabled = true;
 
@@ -210,7 +213,6 @@ namespace PumpTest1
             string fileName = $"Integrated_Log_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
             string fullPath = Path.Combine(_txtPath.Text, fileName);
 
-            // Header 작성
             StringBuilder sbHeader = new StringBuilder();
             sbHeader.Append("Timestamp");
 
@@ -225,8 +227,11 @@ namespace PumpTest1
                 sbHeader.Append($",FMS_{lbl}({unt})");
             }
 
-            // MKS Header (MKS는 Live Unit이 바뀌면 데이터에도 반영되지만 헤더는 초기값 기준 혹은 고정)
-            sbHeader.Append(",MKS_Ch1,MKS_Ch2,MKS_Ch3,MKS_Unit");
+            // [수정됨] MKS Header: 단위를 헤더에 포함하고 Unit 컬럼 제거
+            string mUnit = _mksService.CurrentUnit;
+            if (string.IsNullOrEmpty(mUnit)) mUnit = "Unit";
+            // 예: MKS_Ch1(PASCAL),MKS_Ch2(PASCAL),MKS_Ch3(PASCAL)
+            sbHeader.Append($",MKS_Ch1({mUnit}),MKS_Ch2({mUnit}),MKS_Ch3({mUnit})");
 
             try
             {
@@ -239,15 +244,13 @@ namespace PumpTest1
                     {
                         long loopStart = DateTimeOffset.Now.ToUnixTimeMilliseconds();
 
-                        // [핵심] 현재 Live Data 스냅샷 가져오기
-                        // 화면에 ---- 가 떠있다면(연결 안됨) 여기서도 데이터를 0이나 Err로 처리
                         var tcpData = (_isTcpConnected && _tcpService.Connected) ? _tcpService.CurrentData : null;
                         var mksData = (_isMksConnected) ? _mksService.CurrentData : null;
 
                         StringBuilder sb = new StringBuilder();
                         sb.Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
 
-                        // TCP Data Logging
+                        // TCP Data
                         if (tcpData != null && tcpData.RawValues != null)
                         {
                             for (int i = 0; i < 4; i++)
@@ -255,21 +258,20 @@ namespace PumpTest1
                         }
                         else
                         {
-                            // 연결 끊김 -> 0 또는 빈값 처리 (요청에 따라 ---- 대신 0 기록 등)
                             sb.Append(",0,0,0,0");
                         }
 
-                        // MKS Data Logging
+                        // MKS Data
                         if (mksData != null)
                         {
                             sb.Append($",{(mksData.Ch1.HasValue ? mksData.Ch1.ToString() : "Err")}");
                             sb.Append($",{(mksData.Ch2.HasValue ? mksData.Ch2.ToString() : "Err")}");
                             sb.Append($",{(mksData.Ch3.HasValue ? mksData.Ch3.ToString() : "Err")}");
-                            sb.Append($",{mksData.Unit}");
+                            // [수정됨] Unit 값 저장 부분 제거 (헤더에 포함되었으므로)
                         }
                         else
                         {
-                            sb.Append(",Err,Err,Err,None");
+                            sb.Append(",Err,Err,Err"); // Unit 컬럼에 대한 None 제거
                         }
 
                         await sw.WriteLineAsync(sb.ToString());
@@ -293,10 +295,8 @@ namespace PumpTest1
         // =======================================================================
         private void Timer_Tick(object sender, EventArgs e)
         {
-            // 1. Live Data UI Update
             UpdateRealtimeUI();
 
-            // 2. Logging Status
             if (_isLogging)
             {
                 TimeSpan ts = DateTime.Now - _logStartTime;
@@ -328,9 +328,7 @@ namespace PumpTest1
                 }
                 else
                 {
-                    // 연결 시도 중이거나 끊김
-                    UpdateLight(_lblTcpLight, Color.Red); // 혹은 Gold
-                    // 만약 연결이 끊겼다면 값을 지운다
+                    UpdateLight(_lblTcpLight, Color.Red);
                     if (!_tcpService.Connected) ResetTcpLabelsInternal();
                 }
             }
@@ -344,7 +342,6 @@ namespace PumpTest1
             if (_isMksConnected)
             {
                 var d = _mksService.CurrentData;
-                // MKS는 SerialPort.IsOpen 등으로 연결 확인, 데이터가 갱신되고 있는지 확인
                 if (d != null)
                 {
                     UpdateLight(_lblMksLight, Color.Lime);
@@ -366,7 +363,6 @@ namespace PumpTest1
             }
         }
 
-        // 외부 호출용 초기화 (버튼 클릭 시)
         private void ResetTcpUI()
         {
             UpdateLight(_lblTcpLight, Color.Gray);
@@ -379,7 +375,6 @@ namespace PumpTest1
             ResetMksLabelsInternal();
         }
 
-        // 내부 라벨 텍스트 변경
         private void ResetTcpLabelsInternal()
         {
             if (_tcpValueLabels == null) return;
@@ -393,12 +388,13 @@ namespace PumpTest1
         }
 
         // =======================================================================
-        // UI 생성 (기존 코드 수정)
+        // UI 생성
         // =======================================================================
         private void InitializeUnifiedUI()
         {
-            this.Text = "Integrated Pump Monitor v3.0 (Live)";
+            this.Text = "Integrated Pump Monitor v1.0";
             this.Size = new Size(1150, 600);
+            this.MinimumSize = new Size(1150, 600);
 
             TableLayoutPanel mainLayout = new TableLayoutPanel();
             mainLayout.Dock = DockStyle.Fill;
@@ -408,8 +404,10 @@ namespace PumpTest1
             mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
             mainLayout.Parent = this;
 
+            // =================================================================================
             // [Col 1] FMS
-            GroupBox grpFms = new GroupBox { Text = "FMS System (TCP)", Dock = DockStyle.Fill, Font = new Font("Arial", 10, FontStyle.Bold) };
+            // =================================================================================
+            GroupBox grpFms = new GroupBox { Text = "FMS", Dock = DockStyle.Fill, Font = new Font("Arial", 10, FontStyle.Bold) };
             mainLayout.Controls.Add(grpFms, 0, 0);
 
             Panel pnlFmsTop = new Panel { Location = new Point(10, 25), Size = new Size(330, 110), BorderStyle = BorderStyle.FixedSingle, Parent = grpFms };
@@ -418,7 +416,7 @@ namespace PumpTest1
             new Label { Text = "Port:", Location = new Point(160, 15), AutoSize = true, Font = new Font("Arial", 9), Parent = pnlFmsTop };
             _txtTcpPort = new TextBox { Text = "101", Location = new Point(200, 12), Width = 50, Font = new Font("Arial", 9), Parent = pnlFmsTop };
 
-            _btnTcpConnect = new Button { Text = "CONNECT FMS", Location = new Point(10, 45), Size = new Size(180, 50), BackColor = Color.LightGray, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlFmsTop };
+            _btnTcpConnect = new Button { Text = "CONNECT", Location = new Point(10, 45), Size = new Size(180, 50), BackColor = Color.LightGray, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlFmsTop };
             _btnTcpConnect.Click += BtnTcpConnect_Click;
 
             new Label { Text = "STATUS", Location = new Point(200, 50), AutoSize = true, Font = new Font("Arial", 8), Parent = pnlFmsTop };
@@ -429,12 +427,24 @@ namespace PumpTest1
             for (int i = 0; i < 4; i++)
             {
                 _tcpNameLabels[i] = new Label { Text = $"CH{i + 1}", Location = new Point(20, y), AutoSize = true, Font = new Font("Arial", 12), Parent = grpFms };
-                _tcpValueLabels[i] = new Label { Text = "----", Location = new Point(100, y), AutoSize = true, Font = new Font("Arial", 14, FontStyle.Bold), ForeColor = Color.Blue, Parent = grpFms };
+                _tcpValueLabels[i] = new Label
+                {
+                    Text = "----",
+                    Location = new Point(100, y),
+                    Size = new Size(220, 30),
+                    AutoSize = false,
+                    TextAlign = ContentAlignment.MiddleRight,
+                    Font = new Font("Arial", 14, FontStyle.Bold),
+                    ForeColor = Color.Blue,
+                    Parent = grpFms
+                };
                 y += 60;
             }
 
+            // =================================================================================
             // [Col 2] MKS
-            GroupBox grpMks = new GroupBox { Text = "MKS 946 (Serial)", Dock = DockStyle.Fill, Font = new Font("Arial", 10, FontStyle.Bold) };
+            // =================================================================================
+            GroupBox grpMks = new GroupBox { Text = "MKS 946", Dock = DockStyle.Fill, Font = new Font("Arial", 10, FontStyle.Bold) };
             mainLayout.Controls.Add(grpMks, 1, 0);
 
             Panel pnlMksTop = new Panel { Location = new Point(10, 25), Size = new Size(330, 150), BorderStyle = BorderStyle.FixedSingle, Parent = grpMks };
@@ -455,15 +465,14 @@ namespace PumpTest1
             _btnMksUnitApply = new Button { Text = "Set", Location = new Point(135, 41), Width = 50, Height = 25, Font = new Font("Arial", 9), Parent = pnlMksTop };
             _btnMksUnitApply.Click += BtnMksUnitApply_Click;
 
-            _btnMksConnect = new Button { Text = "CONNECT MKS", Location = new Point(10, 80), Size = new Size(180, 50), BackColor = Color.LightGray, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlMksTop };
+            _btnMksConnect = new Button { Text = "CONNECT", Location = new Point(10, 80), Size = new Size(180, 50), BackColor = Color.LightGray, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlMksTop };
             _btnMksConnect.Click += BtnMksConnect_Click;
 
             new Label { Text = "STATUS", Location = new Point(200, 85), AutoSize = true, Font = new Font("Arial", 8), Parent = pnlMksTop };
             _lblMksLight = new Label { Location = new Point(210, 105), Size = new Size(20, 20), BackColor = Color.Gray, BorderStyle = BorderStyle.FixedSingle, Parent = pnlMksTop };
 
-            // [변경] 큰 유닛 라벨 제거, 대신 개별 수치 라벨 옆에 표시
             _mksValueLabels = new Label[4];
-            y = 190; // 위치 조정
+            y = 190;
             for (int i = 1; i <= 3; i++)
             {
                 new Label { Text = $"CH{i}", Location = new Point(20, y), AutoSize = true, Font = new Font("Arial", 12), Parent = grpMks };
@@ -471,22 +480,26 @@ namespace PumpTest1
                 {
                     Text = "----",
                     Location = new Point(80, y),
-                    Size = new Size(250, 30), // 너비를 넓혀서 유닛까지 표시
+                    Size = new Size(250, 30),
                     AutoSize = false,
-                    TextAlign = ContentAlignment.MiddleLeft, // 왼쪽 정렬
-                    Font = new Font("Arial", 14, FontStyle.Bold), // 폰트 사이즈 조정
+                    TextAlign = ContentAlignment.MiddleRight,
+                    Font = new Font("Arial", 14, FontStyle.Bold),
                     ForeColor = Color.DarkRed,
                     Parent = grpMks
                 };
                 y += 60;
             }
 
+            // =================================================================================
             // [Col 3] Logging
+            // =================================================================================
             GroupBox grpLog = new GroupBox { Text = "Data Logging", Dock = DockStyle.Fill, Font = new Font("Arial", 10, FontStyle.Bold) };
             mainLayout.Controls.Add(grpLog, 2, 0);
 
+            // [중요] 여기서 pnlLog를 선언 및 초기화합니다.
             Panel pnlLog = new Panel { Location = new Point(20, 30), Size = new Size(300, 250), BorderStyle = BorderStyle.FixedSingle, Parent = grpLog };
 
+            // [중요] 아래 컨트롤들은 Parent = pnlLog 를 사용하므로, 위에서 pnlLog가 먼저 생성되어야 합니다.
             new Label { Text = "Save Path:", Location = new Point(10, 15), AutoSize = true, Font = new Font("Arial", 9), Parent = pnlLog };
             _txtPath = new TextBox { Text = AppDomain.CurrentDomain.BaseDirectory, Location = new Point(10, 35), Width = 230, Font = new Font("Arial", 8), Parent = pnlLog };
             _btnBrowse = new Button { Text = "...", Location = new Point(245, 34), Width = 30, Height = 22, Parent = pnlLog };
@@ -498,10 +511,10 @@ namespace PumpTest1
             new Label { Text = "Interval (ms):", Location = new Point(10, 105), AutoSize = true, Font = new Font("Arial", 9), Parent = pnlLog };
             _numInterval = new NumericUpDown { Minimum = 100, Maximum = 60000, Value = 500, Increment = 100, Location = new Point(100, 103), Width = 80, Font = new Font("Arial", 9), Parent = pnlLog };
 
-            _btnStart = new Button { Text = "REC START", Location = new Point(10, 145), Size = new Size(130, 50), BackColor = Color.LightGreen, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlLog };
+            _btnStart = new Button { Text = "START", Location = new Point(10, 145), Size = new Size(130, 50), BackColor = Color.LightGreen, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlLog };
             _btnStart.Click += BtnStartLog_Click;
 
-            _btnStop = new Button { Text = "REC STOP", Location = new Point(145, 145), Size = new Size(130, 50), BackColor = Color.LightPink, Enabled = false, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlLog };
+            _btnStop = new Button { Text = "STOP", Location = new Point(145, 145), Size = new Size(130, 50), BackColor = Color.LightPink, Enabled = false, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlLog };
             _btnStop.Click += BtnStopLog_Click;
 
             _lblElapsed = new Label { Text = "Ready", Location = new Point(100, 210), AutoSize = true, Font = new Font("Arial", 11, FontStyle.Bold), ForeColor = Color.DarkSlateBlue, Parent = pnlLog };
@@ -545,10 +558,6 @@ namespace PumpTest1
 
         private void Form1_Load(object sender, EventArgs e)
         {
-            // 프로그램 시작 시 타이머 가동 (UI 업데이트용)
-            _timerElapsed.Start();
-
-            // 시작 시 자동 연결 (선택 사항)
             _btnTcpConnect.PerformClick();
             if (_cboMksPort.Items.Count > 0) _btnMksConnect.PerformClick();
         }
