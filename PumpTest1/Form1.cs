@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using System.Text;
 using System.IO.Ports;
 using System.Diagnostics;
+using System.Linq; // LINQ ÏÇ¨Ïö© (Any Îì±)
 
 namespace PumpTest1
 {
@@ -15,7 +16,6 @@ namespace PumpTest1
 
         private bool _isLogging = false;
 
-        // ø¨∞· ªÛ≈¬ «√∑°±◊
         private bool _isTcpConnected = false;
         private bool _isMksConnected = false;
 
@@ -29,13 +29,17 @@ namespace PumpTest1
         private Label _lblTcpLight;
         private Label[] _tcpNameLabels;
         private Label[] _tcpValueLabels;
+        private CheckBox _chkFmsAll;      // [NEW] FMS Ï†ÑÏ≤¥ ÏÑ†ÌÉù
+        private CheckBox[] _chkFmsChs;    // [NEW] FMS Í∞úÎ≥Ñ Ï≤¥ÌÅ¨Î∞ïÏä§
 
         // [MKS]
         private ComboBox _cboMksPort, _cboMksUnit;
-        private Button _btnMksRefresh; // Set πˆ∆∞ ¡¶∞≈µ 
+        private Button _btnMksRefresh, _btnMksUnitApply;
         private Button _btnMksConnect;
         private Label _lblMksLight;
         private Label[] _mksValueLabels;
+        private CheckBox _chkMksAll;      // [NEW] MKS Ï†ÑÏ≤¥ ÏÑ†ÌÉù
+        private CheckBox[] _chkMksChs;    // [NEW] MKS Í∞úÎ≥Ñ Ï≤¥ÌÅ¨Î∞ïÏä§
 
         // [Logging]
         private TextBox _txtPath;
@@ -56,7 +60,6 @@ namespace PumpTest1
             _tcpService = new TcpDeviceService();
             _mksService = new MksDeviceService();
 
-            // TCP ¿Ã∫•∆Æ
             _tcpService.OnStatusChanged += (msg) => UpdateStatus($"[TCP] {msg}");
             _tcpService.OnChannelInfoReady += Tcp_OnChannelInfoReady;
             _tcpService.OnError += (msg) => {
@@ -64,14 +67,11 @@ namespace PumpTest1
                 UpdateLight(_lblTcpLight, Color.Red);
             };
 
-            // MKS ¿Ã∫•∆Æ
             _mksService.OnStatusChanged += (msg) => UpdateStatus($"[MKS] {msg}");
             _mksService.OnError += (msg) => {
-                // MKS ø°∑Ø(∆˜∆Æ ¿Ã≈ª µÓ) πﬂª˝ Ω√ ∞≠¡¶∑Œ Disconnect
                 Invoke(new Action(() => HandleMksError(msg)));
             };
 
-            // UI ∞ªΩ≈øÎ ≈∏¿Ã∏”
             _timerElapsed = new System.Windows.Forms.Timer { Interval = 500 };
             _timerElapsed.Tick += Timer_Tick;
             _timerElapsed.Start();
@@ -84,86 +84,68 @@ namespace PumpTest1
             UpdateStatus($"[MKS Err] {msg}");
             if (_isMksConnected)
             {
-                BtnMksConnect_Click(null, null); // ∞≠¡¶ «ÿ¡¶
+                BtnMksConnect_Click(null, null);
                 MessageBox.Show($"MKS Port Error: {msg}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
         // =======================================================================
-        // [FMS] ø¨∞· / «ÿ¡¶
+        // [FMS] Connect
         // =======================================================================
         private async void BtnTcpConnect_Click(object sender, EventArgs e)
         {
             if (_isTcpConnected)
             {
-                // DISCONNECT
                 _tcpService.Stop();
                 _isTcpConnected = false;
-
                 _btnTcpConnect.Text = "CONNECT";
                 _btnTcpConnect.BackColor = Color.LightGray;
-
                 ToggleFmsInputs(true);
                 ResetTcpUI();
                 UpdateStatus("FMS Disconnected.");
-
-                if (_isLogging) _btnTcpConnect.Enabled = false; // ∑Œ±Î ¡ﬂ ¿Áø¨∞· ¬˜¥‹
+                if (_isLogging) _btnTcpConnect.Enabled = false;
             }
             else
             {
-                // CONNECT
                 _tcpService.IpAddress = _txtTcpIp.Text;
                 if (int.TryParse(_txtTcpPort.Text, out int port)) _tcpService.Port = port;
                 _tcpService.IntervalMs = (int)_numInterval.Value;
-
                 _tcpService.Start();
                 _isTcpConnected = true;
-
                 _btnTcpConnect.Text = "DISCONNECT";
                 _btnTcpConnect.BackColor = Color.Salmon;
-
                 ToggleFmsInputs(false);
                 UpdateLight(_lblTcpLight, Color.Gold);
                 UpdateStatus("FMS Connecting...");
-
                 await WaitLabelsAsync();
             }
         }
 
         // =======================================================================
-        // [MKS] ø¨∞· / «ÿ¡¶
+        // [MKS] Connect
         // =======================================================================
         private void BtnMksConnect_Click(object sender, EventArgs e)
         {
             if (_isMksConnected)
             {
-                // DISCONNECT
                 _mksService.Stop();
                 _isMksConnected = false;
-
                 _btnMksConnect.Text = "CONNECT";
                 _btnMksConnect.BackColor = Color.LightGray;
-
                 ToggleMksInputs(true);
                 ResetMksUI();
                 UpdateStatus("MKS Disconnected.");
-
-                if (_isLogging) _btnMksConnect.Enabled = false; // ∑Œ±Î ¡ﬂ ¿Áø¨∞· ¬˜¥‹
+                if (_isLogging) _btnMksConnect.Enabled = false;
             }
             else
             {
-                // CONNECT
                 if (string.IsNullOrEmpty(_cboMksPort.Text)) { MessageBox.Show("Select MKS Port"); return; }
-
                 _mksService.PortName = _cboMksPort.Text;
                 _mksService.IntervalMs = (int)_numInterval.Value;
-
                 _mksService.Start();
                 _isMksConnected = true;
-
                 _btnMksConnect.Text = "DISCONNECT";
                 _btnMksConnect.BackColor = Color.Salmon;
-
                 ToggleMksInputs(false);
                 UpdateLight(_lblMksLight, Color.Gold);
                 UpdateStatus("MKS Connecting...");
@@ -181,42 +163,29 @@ namespace PumpTest1
             }
         }
 
-        // =======================================================================
-        // [«ŸΩ…] MKS ¥‹¿ß ∫Ø∞Ê ∑Œ¡˜ (Set πˆ∆∞ æ¯¿Ã ¡ÔΩ√ ¿˚øÎ)
-        // =======================================================================
         private async void CboMksUnit_SelectedIndexChanged(object sender, EventArgs e)
         {
-            // ∑Œ±Î ¡ﬂ¿Ã∞≈≥™ ∫Ò»∞º∫ ªÛ≈¬∏È π´Ω√
             if (_isLogging || !_cboMksUnit.Enabled) return;
-
             string targetUnit = _cboMksUnit.Text;
             string port = _cboMksPort.Text;
-
             if (string.IsNullOrEmpty(port)) return;
 
-            // ø¨∞·µ» ªÛ≈¬∂Û∏È ¿·Ω√ ∏ÿ√ﬂ∞Ì ∫Ø∞Ê«ÿæﬂ «‘ (∆˜∆Æ ¡°¿Ø πÆ¡¶ «ÿ∞·)
             bool wasConnected = _isMksConnected;
             if (wasConnected)
             {
                 _mksService.Stop();
-                await Task.Delay(500); // ∆˜∆Æ «ÿ¡¶ ¥Î±‚
+                await Task.Delay(500);
             }
 
-            // ¥‹¿ß ∫Ø∞Ê ∏Ì∑… ¿¸º€
             bool ok = _mksService.SetUnit(targetUnit, port);
-
             if (ok) UpdateStatus($"Unit changed to {targetUnit}");
             else UpdateStatus("Failed to change unit.");
 
-            // ¥ŸΩ√ ∏¥œ≈Õ∏µ ¿Á∞≥
-            if (wasConnected)
-            {
-                _mksService.Start();
-            }
+            if (wasConnected) _mksService.Start();
         }
 
         // =======================================================================
-        // ∑Œ±Î ∑Œ¡˜
+        // [Logging Logic] ÏÑ†ÌÉùÎêú Ï±ÑÎÑêÎßå Î°úÍπÖ
         // =======================================================================
         private void BtnStartLog_Click(object sender, EventArgs e)
         {
@@ -226,41 +195,53 @@ namespace PumpTest1
                     return;
             }
 
+            // [NEW] Ï±ÑÎÑê ÏÑ†ÌÉù ÌôïÏù∏ Î°úÏßÅ
+            bool anyFmsSelected = _chkFmsChs.Any(c => c.Checked);
+            bool anyMksSelected = _chkMksChs.Any(c => c.Checked);
+
+            if (_isTcpConnected && !anyFmsSelected)
+            {
+                if (MessageBox.Show("FMS is connected but NO channels are selected.\nContinue without FMS data?", "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.No) return;
+            }
+            if (_isMksConnected && !anyMksSelected)
+            {
+                if (MessageBox.Show("MKS is connected but NO channels are selected.\nContinue without MKS data?", "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.No) return;
+            }
+
+            // Î°úÍπÖ ÏãúÏûë ÏãúÏ†êÏùò Ï≤¥ÌÅ¨Î∞ïÏä§ ÏÉÅÌÉúÎ•º Ï∫°Ï≤ò (ÎèÑÏ§ëÏóê Î∞îÍøîÎèÑ ÌååÏùº Ìè¨Îß∑ Ïú†ÏßÄ ÏúÑÌï¥)
+            bool[] fmsLogFlags = _chkFmsChs.Select(c => c.Checked).ToArray();
+            bool[] mksLogFlags = _chkMksChs.Select(c => c.Checked).ToArray();
+
             _isLogging = true;
             _logStartTime = DateTime.Now;
-
             _btnStart.Enabled = false;
             _btnStop.Enabled = true;
-
-            // [ø‰±∏ªÁ«◊ 1] ∑Œ±Î Ω√¿€ Ω√ ¥‹¿ß ∫Ø∞Ê ¿·±› (ƒﬁ∫∏π⁄Ω∫ ∫Ò»∞º∫»≠)
             _cboMksUnit.Enabled = false;
+            
+            // Ï≤¥ÌÅ¨Î∞ïÏä§Îì§ÎèÑ Î°úÍπÖ Ï§ëÏóî Î≥ÄÍ≤Ω Î™ªÌïòÍ≤å Ïû†Í∏à (ÌååÏùº Ìó§Îçî Íπ®Ïßê Î∞©ÏßÄ)
+            ToggleCheckboxes(false);
 
-            // [ø‰±∏ªÁ«◊ 2] ∑Œ±Î Ω√¿€ »ƒ ø¨∞· πˆ∆∞¿∫ »∞º∫ ¿Ø¡ˆ(≤˜±‚¥¬ ∞°¥…)«œ¡ˆ∏∏ ¿Áø¨∞· ∫“∞°
             _btnTcpConnect.Enabled = true;
             _btnMksConnect.Enabled = true;
 
-            _ = Task.Run(() => MainLoggingLoop((int)_numInterval.Value));
+            _ = Task.Run(() => MainLoggingLoop((int)_numInterval.Value, fmsLogFlags, mksLogFlags));
             UpdateStatus("Logging Started.");
         }
 
         private void BtnStopLog_Click(object sender, EventArgs e)
         {
             _isLogging = false;
-
             _btnStart.Enabled = true;
             _btnStop.Enabled = false;
-
-            // [ø‰±∏ªÁ«◊ 1] ∑Œ±Î ¡æ∑· Ω√ ¥‹¿ß ∫Ø∞Ê ¿·±› «ÿ¡¶
             _cboMksUnit.Enabled = true;
+            ToggleCheckboxes(true); // Ï≤¥ÌÅ¨Î∞ïÏä§ Ïû†Í∏à Ìï¥Ï†ú
 
-            // [ø‰±∏ªÁ«◊ 2] ∑Œ±Î ¡æ∑· Ω√ ø¨∞· πˆ∆∞ ±‚¥… øœ¿¸ ∫π±∏
             _btnTcpConnect.Enabled = true;
             _btnMksConnect.Enabled = true;
-
             UpdateStatus("Logging Stopped.");
         }
 
-        private async Task MainLoggingLoop(int intervalMs)
+        private async Task MainLoggingLoop(int intervalMs, bool[] fmsFlags, bool[] mksFlags)
         {
             string fileName = $"Integrated_Log_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
             string fullPath = Path.Combine(_txtPath.Text, fileName);
@@ -268,19 +249,31 @@ namespace PumpTest1
             StringBuilder sbHeader = new StringBuilder();
             sbHeader.Append("Timestamp");
 
+            // [NEW] ÏÑ†ÌÉùÎêú FMS Ï±ÑÎÑêÎßå Ìó§Îçî ÏÉùÏÑ±
             var tcpLabels = _tcpService.ChannelLabels;
             var tcpUnits = _tcpService.ChannelUnits;
             for (int i = 0; i < 4; i++)
             {
-                string lbl = (tcpLabels != null && i < tcpLabels.Length) ? tcpLabels[i] : $"CH{i + 1}";
-                string unt = (tcpUnits != null && i < tcpUnits.Length) ? tcpUnits[i] : "";
-                lbl = lbl.Replace(",", "_"); unt = unt.Replace(",", "_");
-                sbHeader.Append($",FMS_{lbl}({unt})");
+                if (fmsFlags[i]) // Ï≤¥ÌÅ¨Îêú Í≤ÉÎßå
+                {
+                    string lbl = (tcpLabels != null && i < tcpLabels.Length) ? tcpLabels[i] : $"CH{i + 1}";
+                    string unt = (tcpUnits != null && i < tcpUnits.Length) ? tcpUnits[i] : "";
+                    lbl = lbl.Replace(",", "_"); unt = unt.Replace(",", "_");
+                    sbHeader.Append($",FMS_{lbl}({unt})");
+                }
             }
 
+            // [NEW] ÏÑ†ÌÉùÎêú MKS Ï±ÑÎÑêÎßå Ìó§Îçî ÏÉùÏÑ±
             string mUnit = _mksService.CurrentUnit;
             if (string.IsNullOrEmpty(mUnit)) mUnit = "Unit";
-            sbHeader.Append($",MKS_Ch1({mUnit}),MKS_Ch2({mUnit}),MKS_Ch3({mUnit})");
+            
+            for(int i=0; i<4; i++)
+            {
+                if(mksFlags[i])
+                {
+                    sbHeader.Append($",MKS_Ch{i+1}({mUnit})");
+                }
+            }
 
             try
             {
@@ -292,29 +285,41 @@ namespace PumpTest1
                     while (_isLogging)
                     {
                         long loopStart = DateTimeOffset.Now.ToUnixTimeMilliseconds();
-
                         var tcpData = (_isTcpConnected && _tcpService.Connected) ? _tcpService.CurrentData : null;
                         var mksData = (_isMksConnected) ? _mksService.CurrentData : null;
 
                         StringBuilder sb = new StringBuilder();
                         sb.Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
 
-                        // TCP Data
+                        // FMS Data Logging
                         if (tcpData != null && tcpData.RawValues != null)
                         {
                             for (int i = 0; i < 4; i++)
-                                sb.Append("," + ((i < tcpData.RawValues.Count) ? tcpData.RawValues[i] : "0"));
+                            {
+                                if (fmsFlags[i]) // Ï≤¥ÌÅ¨Îêú Ï±ÑÎÑêÎßå Í∏∞Î°ù
+                                    sb.Append("," + ((i < tcpData.RawValues.Count) ? tcpData.RawValues[i] : "0"));
+                            }
                         }
-                        else sb.Append(",0,0,0,0");
+                        else
+                        {
+                            // Ïó∞Í≤∞ ÎÅäÍπÄ or Îç∞Ïù¥ÌÑ∞ ÏóÜÏùå -> Ï≤¥ÌÅ¨Îêú Ï±ÑÎÑê ÏàòÎßåÌÅº 0 Í∏∞Î°ù
+                            for (int i = 0; i < 4; i++) if (fmsFlags[i]) sb.Append(",0");
+                        }
 
-                        // MKS Data
+                        // MKS Data Logging
                         if (mksData != null)
                         {
-                            sb.Append($",{(mksData.Ch1.HasValue ? mksData.Ch1.ToString() : "Err")}");
-                            sb.Append($",{(mksData.Ch2.HasValue ? mksData.Ch2.ToString() : "Err")}");
-                            sb.Append($",{(mksData.Ch3.HasValue ? mksData.Ch3.ToString() : "Err")}");
+                            double?[] vals = { mksData.Ch1, mksData.Ch2, mksData.Ch3, mksData.Ch4 };
+                            for(int i=0; i<4; i++)
+                            {
+                                if(mksFlags[i])
+                                    sb.Append($",{(vals[i].HasValue ? vals[i].ToString() : "Err")}");
+                            }
                         }
-                        else sb.Append(",Err,Err,Err");
+                        else
+                        {
+                            for(int i=0; i<4; i++) if(mksFlags[i]) sb.Append(",Err");
+                        }
 
                         await sw.WriteLineAsync(sb.ToString());
 
@@ -335,24 +340,23 @@ namespace PumpTest1
         private void Timer_Tick(object sender, EventArgs e)
         {
             UpdateRealtimeUI();
-
             if (_isLogging)
             {
                 TimeSpan ts = DateTime.Now - _logStartTime;
                 _lblElapsed.Text = $"{ts.Days}d {ts.Hours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2}";
             }
-            else
-            {
-                _lblElapsed.Text = "Ready";
-            }
+            else _lblElapsed.Text = "Ready";
         }
 
         // =======================================================================
-        // UI & Init (Set Button Removed)
+        // UI Initialization & Helper Methods
         // =======================================================================
         private void InitializeUnifiedUI()
         {
-            this.Text = "Integrated Pump Monitor v1.2";
+            this.Text = "Integrated Pump Monitor v1.4";
+            // [Í∞úÏÑ† 1] Ï∞Ω ÌÅ¨Í∏∞ Í≥†Ï†ï Î∞è ÏµúÎåÄÌôî Î∞©ÏßÄ
+            this.FormBorderStyle = FormBorderStyle.FixedSingle;
+            this.MaximizeBox = false;
             this.Size = new Size(1150, 600);
 
             TableLayoutPanel mainLayout = new TableLayoutPanel();
@@ -377,16 +381,23 @@ namespace PumpTest1
             new Label { Text = "STATUS", Location = new Point(200, 50), AutoSize = true, Font = new Font("Arial", 8), Parent = pnlFmsTop };
             _lblTcpLight = new Label { Location = new Point(210, 70), Size = new Size(20, 20), BackColor = Color.Gray, BorderStyle = BorderStyle.FixedSingle, Parent = pnlFmsTop };
 
+            // [NEW] FMS Ï†ÑÏ≤¥ ÏÑ†ÌÉù Ï≤¥ÌÅ¨Î∞ïÏä§
+            _chkFmsAll = new CheckBox { Text = "ALL", Location = new Point(20, 145), AutoSize = true, Checked = true, Font = new Font("Arial", 9, FontStyle.Bold), Parent = grpFms };
+            _chkFmsAll.CheckedChanged += (s, e) => { foreach (var c in _chkFmsChs) c.Checked = _chkFmsAll.Checked; };
+
             _tcpNameLabels = new Label[4]; _tcpValueLabels = new Label[4];
-            int y = 150;
+            _chkFmsChs = new CheckBox[4]; // [NEW] Í∞úÎ≥Ñ Ï≤¥ÌÅ¨Î∞ïÏä§ Î∞∞Ïó¥
+            int y = 170;
             for (int i = 0; i < 4; i++)
             {
-                _tcpNameLabels[i] = new Label { Text = $"CH{i + 1}", Location = new Point(20, y), AutoSize = true, Font = new Font("Arial", 12), Parent = grpFms };
-                _tcpValueLabels[i] = new Label { Text = "----", Location = new Point(100, y), Size = new Size(220, 30), AutoSize = false, TextAlign = ContentAlignment.MiddleRight, Font = new Font("Arial", 14, FontStyle.Bold), ForeColor = Color.Blue, Parent = grpFms };
-                y += 60;
+                // Ï≤¥ÌÅ¨Î∞ïÏä§ Ï∂îÍ∞Ä
+                _chkFmsChs[i] = new CheckBox { Location = new Point(20, y + 5), AutoSize = true, Checked = true, Parent = grpFms };
+                _tcpNameLabels[i] = new Label { Text = $"CH{i + 1}", Location = new Point(45, y), AutoSize = true, Font = new Font("Arial", 12), Parent = grpFms };
+                _tcpValueLabels[i] = new Label { Text = "----", Location = new Point(120, y), Size = new Size(200, 30), AutoSize = false, TextAlign = ContentAlignment.MiddleRight, Font = new Font("Arial", 14, FontStyle.Bold), ForeColor = Color.Blue, Parent = grpFms };
+                y += 50;
             }
 
-            // [Col 2] MKS (Set Button Removed)
+            // [Col 2] MKS
             GroupBox grpMks = new GroupBox { Text = "MKS 946", Dock = DockStyle.Fill, Font = new Font("Arial", 10, FontStyle.Bold) };
             mainLayout.Controls.Add(grpMks, 1, 0);
 
@@ -397,25 +408,30 @@ namespace PumpTest1
             _btnMksRefresh.Click += (s, e) => { _cboMksPort.Items.Clear(); _cboMksPort.Items.AddRange(SerialPort.GetPortNames()); if (_cboMksPort.Items.Count > 0) _cboMksPort.SelectedIndex = _cboMksPort.Items.Count - 1; };
 
             new Label { Text = "Unit:", Location = new Point(10, 45), AutoSize = true, Font = new Font("Arial", 9), Parent = pnlMksTop };
-            _cboMksUnit = new ComboBox { Location = new Point(50, 42), Width = 135, Font = new Font("Arial", 9), Parent = pnlMksTop }; // ≥ ∫Ò »Æ¿Â
+            _cboMksUnit = new ComboBox { Location = new Point(50, 42), Width = 135, Font = new Font("Arial", 9), Parent = pnlMksTop };
             _cboMksUnit.Items.AddRange(new object[] { "PASCAL", "TORR", "MBAR", "MICRON" });
             _cboMksUnit.SelectedIndex = 0;
-            // [¡ﬂø‰] ≈« ∫Ø∞Ê(º±≈√ ∫Ø∞Ê) Ω√ ¡ÔΩ√ ¿˚øÎ ¿Ã∫•∆Æ ø¨∞·
             _cboMksUnit.SelectedIndexChanged += CboMksUnit_SelectedIndexChanged;
 
             _btnMksConnect = new Button { Text = "CONNECT", Location = new Point(10, 80), Size = new Size(180, 50), BackColor = Color.LightGray, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlMksTop };
             _btnMksConnect.Click += BtnMksConnect_Click;
-
             new Label { Text = "STATUS", Location = new Point(200, 85), AutoSize = true, Font = new Font("Arial", 8), Parent = pnlMksTop };
             _lblMksLight = new Label { Location = new Point(210, 105), Size = new Size(20, 20), BackColor = Color.Gray, BorderStyle = BorderStyle.FixedSingle, Parent = pnlMksTop };
 
-            _mksValueLabels = new Label[4];
-            y = 190;
-            for (int i = 1; i <= 3; i++)
+            // [NEW] MKS Ï†ÑÏ≤¥ ÏÑ†ÌÉù Ï≤¥ÌÅ¨Î∞ïÏä§
+            _chkMksAll = new CheckBox { Text = "ALL", Location = new Point(20, 185), AutoSize = true, Checked = true, Font = new Font("Arial", 9, FontStyle.Bold), Parent = grpMks };
+            _chkMksAll.CheckedChanged += (s, e) => { foreach (var c in _chkMksChs) c.Checked = _chkMksAll.Checked; };
+
+            _mksValueLabels = new Label[5];
+            _chkMksChs = new CheckBox[4]; // [NEW]
+            y = 210;
+            for (int i = 1; i <= 4; i++)
             {
-                new Label { Text = $"CH{i}", Location = new Point(20, y), AutoSize = true, Font = new Font("Arial", 12), Parent = grpMks };
-                _mksValueLabels[i] = new Label { Text = "----", Location = new Point(80, y), Size = new Size(250, 30), AutoSize = false, TextAlign = ContentAlignment.MiddleRight, Font = new Font("Arial", 14, FontStyle.Bold), ForeColor = Color.DarkRed, Parent = grpMks };
-                y += 60;
+                // Ï≤¥ÌÅ¨Î∞ïÏä§ Ï∂îÍ∞Ä (Î∞∞Ïó¥ Ïù∏Îç±Ïä§ 0~3 ÏÇ¨Ïö©)
+                _chkMksChs[i-1] = new CheckBox { Location = new Point(20, y + 5), AutoSize = true, Checked = true, Parent = grpMks };
+                new Label { Text = $"CH{i}", Location = new Point(45, y), AutoSize = true, Font = new Font("Arial", 12), Parent = grpMks };
+                _mksValueLabels[i] = new Label { Text = "----", Location = new Point(100, y), Size = new Size(230, 30), AutoSize = false, TextAlign = ContentAlignment.MiddleRight, Font = new Font("Arial", 14, FontStyle.Bold), ForeColor = Color.DarkRed, Parent = grpMks };
+                y += 50;
             }
 
             // [Col 3] Logging
@@ -431,24 +447,32 @@ namespace PumpTest1
             _btnOpenFolder.Click += (s, e) => { try { Process.Start("explorer.exe", _txtPath.Text); } catch { } };
 
             new Label { Text = "Interval (ms):", Location = new Point(10, 105), AutoSize = true, Font = new Font("Arial", 9), Parent = pnlLog };
-            _numInterval = new NumericUpDown { Minimum = 100, Maximum = 60000, Value = 500, Increment = 100, Location = new Point(100, 103), Width = 80, Font = new Font("Arial", 9), Parent = pnlLog };
+            _numInterval = new NumericUpDown { Minimum = 100, Maximum = 60000, Value = 500, Increment = 100, Location = new Point(10, 125), Width = 80, Parent = pnlLog };
 
-            _btnStart = new Button { Text = "START", Location = new Point(10, 145), Size = new Size(130, 50), BackColor = Color.LightGreen, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlLog };
+            _btnStart = new Button { Text = "START", Location = new Point(10, 160), Size = new Size(130, 50), BackColor = Color.LightGreen, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlLog };
             _btnStart.Click += BtnStartLog_Click;
-            _btnStop = new Button { Text = "STOP", Location = new Point(145, 145), Size = new Size(130, 50), BackColor = Color.LightPink, Enabled = false, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlLog };
+            _btnStop = new Button { Text = "STOP", Location = new Point(145, 160), Size = new Size(130, 50), BackColor = Color.LightPink, Enabled = false, Font = new Font("Arial", 10, FontStyle.Bold), Parent = pnlLog };
             _btnStop.Click += BtnStopLog_Click;
 
-            _lblElapsed = new Label { Text = "Ready", Location = new Point(100, 210), AutoSize = true, Font = new Font("Arial", 11, FontStyle.Bold), ForeColor = Color.DarkSlateBlue, Parent = pnlLog };
+            _lblElapsed = new Label { Text = "Ready", Location = new Point(100, 220), AutoSize = true, Font = new Font("Arial", 11, FontStyle.Bold), ForeColor = Color.DarkSlateBlue, Parent = pnlLog };
             _lblStatus = new Label { Dock = DockStyle.Bottom, Height = 30, Text = "Ready", BackColor = Color.FromArgb(240, 240, 240), TextAlign = ContentAlignment.MiddleLeft, Parent = this };
 
             _btnMksRefresh.PerformClick();
+        }
+
+        private void ToggleCheckboxes(bool enable)
+        {
+            _chkFmsAll.Enabled = enable;
+            foreach (var c in _chkFmsChs) c.Enabled = enable;
+            _chkMksAll.Enabled = enable;
+            foreach (var c in _chkMksChs) c.Enabled = enable;
         }
 
         private void UpdateRealtimeUI()
         {
             if (IsDisposed) return;
 
-            // TCP UI Update
+            // TCP UI
             if (_isTcpConnected)
             {
                 if (_tcpService.Connected && _tcpService.CurrentData != null)
@@ -474,7 +498,7 @@ namespace PumpTest1
                 UpdateLight(_lblTcpLight, Color.Gray);
             }
 
-            // MKS UI Update
+            // MKS UI
             if (_isMksConnected)
             {
                 var d = _mksService.CurrentData;
@@ -485,6 +509,7 @@ namespace PumpTest1
                     if (_mksValueLabels[1] != null) _mksValueLabels[1].Text = (d.Ch1.HasValue ? $"{d.Ch1} {unit}" : $"Err {unit}");
                     if (_mksValueLabels[2] != null) _mksValueLabels[2].Text = (d.Ch2.HasValue ? $"{d.Ch2} {unit}" : $"Err {unit}");
                     if (_mksValueLabels[3] != null) _mksValueLabels[3].Text = (d.Ch3.HasValue ? $"{d.Ch3} {unit}" : $"Err {unit}");
+                    if (_mksValueLabels[4] != null) _mksValueLabels[4].Text = (d.Ch4.HasValue ? $"{d.Ch4} {unit}" : $"Err {unit}");
                 }
                 else
                 {
@@ -508,7 +533,6 @@ namespace PumpTest1
             try { File.WriteAllText(_configFile, $"MKS_PORT={_cboMksPort.Text}\nTCP_IP={_txtTcpIp.Text}\nTCP_PORT={_txtTcpPort.Text}\nLOG_PATH={_txtPath.Text}\n"); } catch { }
         }
         private void Form1_Load(object sender, EventArgs e) { _btnTcpConnect.PerformClick(); if (_cboMksPort.Items.Count > 0) _btnMksConnect.PerformClick(); }
-        protected override void OnFormClosing(FormClosingEventArgs e) { SaveSettings(); _isLogging = false; _tcpService?.Stop(); _mksService?.Stop(); base.OnFormClosing(e); }
         private void UpdateStatus(string msg) { if (!IsDisposed) Invoke(new Action(() => _lblStatus.Text = msg)); }
         private void UpdateLight(Label light, Color color) { if (!IsDisposed && light != null) Invoke(new Action(() => light.BackColor = color)); }
         private void ToggleFmsInputs(bool en) { _txtTcpIp.Enabled = _txtTcpPort.Enabled = en; }
@@ -518,5 +542,6 @@ namespace PumpTest1
         private void ResetMksUI() { UpdateLight(_lblMksLight, Color.Gray); ResetMksLabelsInternal(); }
         private void ResetTcpLabelsInternal() { if (_tcpValueLabels == null) return; foreach (var lbl in _tcpValueLabels) if (lbl != null) lbl.Text = "----"; }
         private void ResetMksLabelsInternal() { if (_mksValueLabels == null) return; foreach (var lbl in _mksValueLabels) if (lbl != null) lbl.Text = "----"; }
+        private void BtnMksUnitApply_Click(object sender, EventArgs e) { if (!string.IsNullOrEmpty(_cboMksPort.Text)) _mksService.SetUnit(_cboMksUnit.Text, _cboMksPort.Text); }
     }
 }
