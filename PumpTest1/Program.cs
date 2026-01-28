@@ -8,6 +8,9 @@ namespace PumpTest1
         [STAThread]
         static void Main()
         {
+            // [수정] DpiUnaware로 설정하여 윈도우가 알아서 확대하도록 함 (레이아웃 고정)
+            Application.SetHighDpiMode(HighDpiMode.DpiUnaware);
+
             // To customize application configuration such as set high DPI settings or default font,
             // see https://aka.ms/applicationconfiguration.
             ApplicationConfiguration.Initialize();
